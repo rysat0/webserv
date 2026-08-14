@@ -199,8 +199,198 @@ access, stat, open, opendir, readdir, closedir
 | デフォルト設定パス | `./conf/default.conf`(引数なし起動時に読む) |
 | シグナル処理 | `SIGPIPE` は `SIG_IGN` で無視(send失敗時はerrnoを見ず接続close)。`SIGINT` はフラグ方式でグレースフル終了(全fd close・全メモリ解放してから終了) |
 | CGI環境変数 | RFC 3875 準拠: `REQUEST_METHOD, SCRIPT_NAME, PATH_INFO, QUERY_STRING, CONTENT_LENGTH, CONTENT_TYPE, SERVER_PROTOCOL, GATEWAY_INTERFACE, SERVER_NAME, SERVER_PORT, REMOTE_ADDR, SERVER_SOFTWARE` + 全HTTPヘッダーを `HTTP_*` 形式(大文字化・`-`→`_`)で転送 |
+| ConfigParser構成 | 1クラス(トークナイザとパーサーはprivate関数で分離) |
+| CGI状態の持ち方 | 独立クラス `CgiProcess`(fd→オブジェクトの対応表で引ける形) |
+| Router構成 | 1クラス+private関数分割(`handleGet/handlePost/handleDelete/handleCgi`...) |
+| pollfd配列管理 | 毎周再構築(Client/CGI一覧から配列と監視フラグを毎回計算) |
+| 例外方針 | 起動フェーズのみ例外可・ループ内は戻り値方式。保険としてループに `catch(std::exception&)` の防波堤(ログ+接続close)。bad_alloc もここで受ける |
 
 ## 未決定(次に決めること)
 
 - [ ] ディレクティブ名の**具体的な一覧表**の作成(必須/任意の区別を含む)
 - [ ] HttpRequest / HttpResponse の**具体的なシグネチャ**(メソッド名・戻り値の確定)
+
+---
+
+# クラス設計(全13クラス+2表)
+
+## 一覧と責務
+
+### 設定ドメイン(B担当)
+
+| クラス | 責務 | 生成タイミング |
+|---|---|---|
+| `ConfigParser` | ファイル→トークン化→構文解析→validation。エラーなら警告して終了 | 起動時1回・使い捨て |
+| `Config` | パース結果の最上位入れ物 | 起動時1回・終了まで不変 |
+| `ServerConfig` | server ブロック1個分のデータ | 同上 |
+| `LocationConfig` | location ブロック1個分のデータ | 同上 |
+
+※ Config 系3クラスは読み取り専用の構造体(ロジックは持たない)。
+
+### ネットワーク/イベントドメイン(A担当)
+
+| クラス | 責務 | 生成タイミング |
+|---|---|---|
+| `ServerSocket` | socket→setsockopt→bind→listen→ノンブロッキング化(1ポート分) | 起動時・ポート数分 |
+| `EventLoop` | poll 本体。fd 登録簿、イベント配送、タイムアウト見回り、終了時の後始末 | 起動時1個 |
+| `Client` | 接続1本の状態機械(バッファ・状態・最終活動時刻) | accept 時に生成 / close 時に破棄 |
+| `CgiProcess` | 実行中 CGI 1本の状態(pid・パイプfd・バッファ・開始時刻) | CGI 開始時に生成 / waitpid 後に破棄 |
+
+### HTTPドメイン(B担当)
+
+| クラス | 責務 |
+|---|---|
+| `HttpRequest` | 逐次パース(断片投入→状態遷移→完成判定)。chunked デコード含む |
+| `HttpResponse` | レスポンス組み立て+`serialize()`+エラーページ工場 |
+| `Router` | Request+Config → 静的/autoindex/アップロード/DELETE/リダイレクト/CGI/エラーの振り分け |
+| `CgiExecutor` | pipe×2→fork→dup2→chdir→execve と環境変数(char**)組み立て。起動のみ担当 |
+
+### 共通(共同)
+
+| クラス/表 | 責務 |
+|---|---|
+| `Logger` | `info/warn/error`。レベルフィルタ。ファイル出力なし |
+| MIME タイプ表 | 拡張子→Content-Type。static 関数1個 |
+| ステータスコード表 | code→文言。HttpResponse 内の static 関数 |
+
+## 所有関係
+
+```
+main
+ └─ Config(不変・全員が const 参照で覗く)
+ └─ EventLoop
+     ├─ ServerSocket × ポート数
+     ├─ Client × 接続数          ← accept 時 new / close 時 delete
+     │   └─ HttpRequest(値として内包)
+     │   └─ send_buffer(serialize 済み Response)
+     └─ CgiProcess × 実行中CGI数  ← Router 経由で生成 / 完了時 delete
+         └─ 親 Client へのポインタ
+```
+
+Router / CgiExecutor / HttpResponse は状態を持たない道具(生成物を返すだけ)。
+
+## 主要インターフェース
+
+### HttpRequest
+
+```cpp
+class HttpRequest {
+public:
+    enum State { PARSING_HEADERS, PARSING_BODY, PARSING_CHUNKED,
+                 COMPLETE, ERROR };
+
+    HttpRequest();
+
+    // Client(A側)が呼ぶ
+    void   appendData(const char* data, size_t len);  // recv 断片を投入
+    State  getState() const;
+    int    getErrorCode() const;      // ERROR 時: 400, 413, 501 など
+    void   setMaxBodySize(size_t n);  // Config の値を注入(早期413判定)
+
+    // Router(B側)が COMPLETE 後に呼ぶ
+    const std::string& getMethod() const;
+    const std::string& getPath() const;         // ? 以降除去済み
+    const std::string& getQueryString() const;  // ? の後ろ、生のまま
+    const std::string& getVersion() const;
+    std::string        getHeader(const std::string& key) const;  // 大小無視
+    const std::string& getBody() const;         // un-chunk 済み
+};
+```
+
+- エラー判定(400/413/501)はパース時点で Request 自身が行う
+- ヘッダーキーは内部で小文字化して格納
+- chunked デコードはこのクラスに閉じる(CGI の un-chunk 要件を自動で満たす)
+
+### HttpResponse
+
+```cpp
+class HttpResponse {
+public:
+    HttpResponse();
+    void setStatus(int code);   // reason phrase は内部表で自動解決
+    void setHeader(const std::string& key, const std::string& value);
+    void setBody(const std::string& body, const std::string& contentType);
+                                // Content-Length / Content-Type 自動設定
+    std::string serialize() const;
+                                // Server, Date, Connection: close 自動付与
+    static HttpResponse makeError(int code, const ServerConfig& conf);
+                                // error_page 指定 or 内蔵デフォルトHTML
+};
+```
+
+- `\r\n` の組み立ては serialize() に封じ込める
+- エラー生成は makeError に一元化(発生箇所: Router / Request / EventLoop)
+- 注記: CGI 対応時(フェーズ7)に Router::handle の戻り値を拡張予定
+
+### Config 系(読み取り専用)
+
+```cpp
+class LocationConfig {   // 全て getter のみ
+    // path, root, allowedMethods, index, autoindex,
+    // uploadPath(空=不可), cgiExtensions(map<ext,interpreter>), redirect
+};
+class ServerConfig {
+    // host, port, clientMaxBodySize, errorPages(map<int,path>)
+    const LocationConfig* findLocation(const std::string& path) const;
+                         // 最長前方一致。マッチなしは NULL → 404
+};
+class Config {
+    // servers への const アクセスのみ
+};
+```
+
+### EventLoop / Client / CgiProcess(A側内部)
+
+```cpp
+class EventLoop {
+public:
+    EventLoop(const Config& conf);
+    void run();   // シグナルフラグが立つまで無限ループ
+private:
+    void rebuildPollfds();          // 毎周再構築(決定事項)
+    void handleListenEvent(int fd);
+    void handleClientEvent(Client& c, short revents);
+    void handleCgiEvent(CgiProcess& p, short revents);
+    void checkTimeouts();           // 60秒 / CGI 10秒
+    void cleanup();                 // 終了時: 全fd close・全delete
+};
+
+class Client {
+public:
+    enum State { READING_REQUEST, PROCESSING, WAITING_CGI,
+                 WRITING_RESPONSE, CLOSING };
+    // fd, state, recvBuffer, sendBuffer, HttpRequest, lastActivity,
+    // 所属 ServerConfig* を保持
+};
+
+class CgiProcess {
+    // pid, stdinFd(書込), stdoutFd(読取), 残り書込ボディ,
+    // 出力蓄積バッファ, 開始時刻, 親 Client*
+};
+```
+
+### CgiExecutor / Logger
+
+```cpp
+class CgiExecutor {
+public:
+    // 成功: 新しい CgiProcess を返す / 失敗: NULL(→ 502)
+    static CgiProcess* launch(const HttpRequest& req,
+                              const LocationConfig& loc,
+                              const ServerConfig& srv,
+                              Client& owner);
+private:
+    static char** buildEnvp(...);   // RFC 3875 変数 + HTTP_* 変換
+};
+
+class Logger {
+public:
+    enum Level { DEBUG, INFO, WARN, ERROR };
+    static void setLevel(Level l);
+    static void debug(const std::string& msg);
+    static void info (const std::string& msg);
+    static void warn (const std::string& msg);
+    static void error(const std::string& msg);
+    // 形式: [YYYY-MM-DD HH:MM:SS] [LEVEL] msg
+};
+```
