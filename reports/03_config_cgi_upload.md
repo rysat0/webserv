@@ -2,6 +2,8 @@
 
 一次情報: nginx ドキュメント(`ngx_http_core_module` の server/location/root/index/autoindex/error_page/client_max_body_size/limit_except/return)、RFC 3875(CGI)、RFC 7578(multipart/form-data)、RFC 3986、RFC 6265(ボーナス)。
 
+CGIの最新の合意状況は、末尾の「C12 CGIの最小構成・決定事項と残る合意」を参照。C8〜C10には調査項目も含まれ、列挙された機能すべてを実装するという意味ではない。
+
 ---
 
 ## C1 設定ファイル文法 【B, R:M, D:L, ★★★】
@@ -87,7 +89,7 @@
 - `fork` 後に子で C++ オブジェクトが多数存在する状態 → 子は `execve` 直前までに**複雑な処理をしない**(メモリ確保など)、`envp` は fork 前に構築しておく(`char**` の組み立て・解放責任の明確化)。
 - 子プロセス回収: `waitpid`(`WNOHANG`)、ゾンビ防止。タイムアウト時の `kill(pid, SIGKILL)` → `waitpid`。
 - `execve` 失敗の検知方法(子がexec失敗で `_exit(1)` した場合、親は「出力が空+終了コード非0」で判断 → 502/500)。
-- インタプリタ/スクリプトの検証: ファイル存在、実行権限(`access(X_OK)`)。
+- インタプリタ/スクリプトの検証: インタプリタは存在・実行権限、Pythonへ引数として渡すスクリプトは通常ファイルであること・読み取り権限を確認する。スクリプト自身の実行権限は要求しない。
 - fd継承: 他クライアントのソケットfdが子に漏れる問題(`FD_CLOEXEC` を使うか、子で全fdをclose)。
 
 ## C9 CGI仕様(RFC 3875) 【B(主)/共, R:L, D:L, ★★★】
@@ -95,14 +97,14 @@
 **理解すべきこと**
 - **メタ変数**(RFC 3875 §4.1)。決定事項に挙がった `REQUEST_METHOD, SCRIPT_NAME, PATH_INFO, QUERY_STRING, CONTENT_LENGTH, CONTENT_TYPE, SERVER_PROTOCOL, GATEWAY_INTERFACE, SERVER_NAME, SERVER_PORT, REMOTE_ADDR, SERVER_SOFTWARE` + `HTTP_*`。それぞれの**値の作り方**:
   - `SCRIPT_NAME`/`PATH_INFO` の分離(`/cgi/test.py/extra/path` → script=`/cgi/test.py`、PATH_INFO=`/extra/path`)。この分割ロジックの仕様が必要。
-  - `PATH_TRANSLATED`、`SCRIPT_FILENAME`(PHP-CGIでは `SCRIPT_FILENAME` と `REDIRECT_STATUS` が必須なことが多い。**Python第一**でも将来のPHP対応に備え記録)。
-  - `CONTENT_LENGTH`/`CONTENT_TYPE` はボディがある場合のみ。`QUERY_STRING` は未デコードのまま。
+  - 必須部分はPythonのみとし、PHP固有の環境変数は追加しない(今回確定、C12)。`PATH_TRANSLATED` の採否は `PATH_INFO` の対応範囲と合わせて確定する。
+  - `CONTENT_LENGTH` は復号後のボディ長、`CONTENT_TYPE` は要求ヘッダーから決める。ボディなし・ヘッダーなしの場合の空値/省略規則はC12で確定する。`QUERY_STRING` は未デコードのまま。
   - `HTTP_*` 変換: ヘッダー名を大文字化、`-`→`_`、接頭辞`HTTP_`。`Content-Type`/`Content-Length` は `HTTP_` を付けない。**`Proxy` ヘッダー(`HTTP_PROXY`)による httpoxy 脆弱性**対策として `Proxy` ヘッダーを渡さない選択。
 - **リクエストボディの渡し方**: un-chunk 済みのボディを子のstdinへ全て書き、書き終えたらstdinを **close(EOF)**(課題要件)。ボディが大きいと pipe バッファ(64KB程度)を超える → **書き込みもノンブロッキング+POLLOUT**(死活: 子が出力を溜めて読まないとデッドロックし得る → 読み/書きを同時にpoll)。
 - **CGI出力のパース**(§6): `CGI-response = document-response / local-redir-response / client-redir-response / client-redirdoc-response`。ヘッダー部(`Content-Type`, `Status`, `Location`, 任意ヘッダー)+空行+ボディ。
-  - `Status: 404 Not Found` → HTTPのステータス行へ変換。なければ200。
+  - `Status: 404 Not Found` → HTTPのステータス行へ変換。通常の文書応答で省略された場合は200。リダイレクトは別の規則で扱う。
   - `Location:` のみ(ローカル絶対パス `/..`)→ サーバー内部リダイレクト(スコープ内か外か決める)。絶対URI → 302。
-  - `Content-Type` がない場合のエラー扱い(502)。
+  - 通常の文書応答で `Content-Type` がない場合のエラー扱い(502案)。Locationのみのリダイレクトとは区別する。
   - **ヘッダー区切りが LF/CRLF 両方**あり得る(Pythonの`print`はLF)。
   - **`Content-Length` が無ければ EOF を終端とする**(課題要件)。サーバー側は終端後に自分で `Content-Length` を付けて返す(接続は `Connection: close`)。
 - 終了ステータス(非0)、stderr の扱い(捨てる/ログに出す。stderrをpollするか、`/dev/null`へか)。
@@ -118,6 +120,102 @@
 
 - `Set-Cookie`/`Cookie` の形式(RFC 6265)、属性(`Path`, `Expires`/`Max-Age`, `HttpOnly`, `SameSite`)。セッションIDの生成(乱数源: 許可関数に `rand` 系があるか要確認)、サーバー側セッション保管(メモリ上のmap)。
 - ボーナスは**必須部分が完璧な場合のみ評価**されるため、優先度は最低。複数CGIタイプ対応(PHP等)も同様。
+
+## C12 CGIの最小構成・決定事項と残る合意 【共】
+
+記録日: 2026-10-04。課題PDF Version 24.1と参考資料を踏まえ、必須部分の実装量を抑えるための合意状況を記録する。
+
+**今回承認されたのは、次の7項目。後続の仕様案・数値案・分担の詳細は未確定であり、二人で合意してから決定事項へ移す。** 今回の記録先は本書のみ。`Requirements.md` の「Python第一」等は未更新のため、今回確定した7項目については本節を最新の記録として扱う。
+
+### 決めたこと：今回確定した7項目
+
+| ID | 項目 | 決定 |
+|---|---|---|
+| CGI-01 | 対応言語 | 必須部分ではPythonのみ。PHP固有の対応は作らない |
+| CGI-02 | 起動方法 | 設定したPythonの絶対パスを `execve` で実行する。シェルやshebangの解釈は実装しない |
+| CGI-03 | 入力 | リクエストを受信・復号してから起動する。クエリは環境変数、ボディは加工せずstdinへ渡す |
+| CGI-04 | 出力 | stdoutを上限付きで蓄積し、EOFと子の終了を確認してからHTTP応答を作る。ブラウザへの逐次転送はしない |
+| CGI-05 | CGIの種類 | 通常のCGIだけを対象とする。HTTPレスポンス全文を直接出すNPH、FastCGI、常駐プロセスは対象外 |
+| CGI-06 | 周辺機能 | 認証、セッション、逆引きDNS、PHP専用環境変数は追加しない。C11は必須部分の実装対象に含めない |
+| CGI-07 | Config | 既存の `cgi_extension` を使う。タイムアウトや出力上限の設定項目は増やさず、まずコード内定数にする |
+
+CGI-03の「加工せず」は、HTTPのchunked復号後のボディをそのまま渡すという意味。CGIへの受け渡しのためにフォームの `name=value` 分解、URLデコード、multipartの分解をWebserv側で行わない。通常のアップロード機能(C6)の形式・保存処理は別途決める。
+
+CGI-01は対応・検証する言語の範囲を決めたもの。Configで受理する拡張子を `.py` に限定するか、拡張子とインタプリタの組を何個許可するかまで承認したものではない。[Config合意案](05_config_agreement.md)の未確定事項と合わせて決める。
+
+### 維持する課題要件・既存の決定
+
+- 課題要件: 拡張子によるCGI実行、リクエスト情報・引数の受け渡し、chunkedの復号、入力/出力のEOFの扱い、相対ファイルにアクセスできる作業ディレクトリ、最低1種類のCGIを満たす。
+- 課題要件: 親サーバーはノンブロッキングで動かし、待ちが発生するパイプI/Oも同じpoll等で管理する。入力書き込みと出力読み取りを並行して進め、部分読み書き、切断、子プロセスの後始末を省かない。
+- 既決定: CGIは10秒でkill + 504。起点や延長の有無は下表で確定する。
+- 既決定: `SERVER_PROTOCOL` は受信した要求のHTTPバージョン。chunkedの場合の `CONTENT_LENGTH` は復号後のバイト数。入力を全て書いたら親側のstdin用パイプを閉じる。
+- 既決定: HTTP/1.0で応答し、1接続1要求、`Connection: close`。本文とContent-Lengthの可否は204等のステータスに応じて既存のHTTP規則を使う。
+- Configの既決定: `root` / `alias` の意味と、設定中の相対パスを設定ファイルのディレクトリ基準で解決する規則は維持する。CGI実行時の作業ディレクトリとは区別する。
+
+### 確定すべきこと：外部に見える仕様案
+
+以下はすべて**未合意の推奨案**。採用する項目にチェックし、変更した場合は具体的な動作も書き換える。
+
+| 合意 | 論点 | 推奨案・確定する内容 |
+|---|---|---|
+| [ ] | 起動条件・メソッド | 選択されたlocationで設定した拡張子のスクリプトを実行する。CGIはGET/POSTを許可し、DELETEは通常locationで提供する。indexとして選ばれた `index.py` にも同じ実行判定を適用する |
+| [ ] | PATH_INFO | `/cgi/test.py/extra?x=1` を `SCRIPT_NAME=/cgi/test.py`、`PATH_INFO=/extra`、`QUERY_STRING=x=1` に分ける基本形に対応する。スクリプト部分の特定方法とURI正規化後の扱いを固定する |
+| [ ] | アップロードとの分離 | アップロード保存とCGI実行のlocation・保存先を分ける。CGI自身によるボディ処理は `upload_store` と区別する |
+| [ ] | 実行パス・cwd | Bがroot/aliasからスクリプトの絶対パスとそのディレクトリを解決する。Aは子プロセスだけで `chdir` し、Pythonとスクリプトの絶対パスを使って実行する |
+| [ ] | 環境変数 | 既存の変数一覧について、値の出所と空値/省略の規則を表にする。特にボディなしの `CONTENT_LENGTH`、未指定の `CONTENT_TYPE`、追加パスなしの `PATH_INFO`、Hostなしの `SERVER_NAME` を確定する |
+| [ ] | HTTPヘッダーの転送 | `HTTP_*` へ変換する例外規則を定める。Content-Type/Content-Lengthは専用変数を使い、接続制御用のヘッダーは除外する。同名ヘッダーの扱いもHTTPパーサーと揃える |
+| [ ] | コマンドライン引数 | `?a+b` をargvへ展開する形式は対象外とする。クエリは常に `QUERY_STRING` に渡し、argvはPythonとスクリプトの実行に必要な引数だけにする |
+| [ ] | 文書応答の解析 | ヘッダーと空行と本文を分離し、LF/CRLFの両方を受理する。Content-Typeを要求し、Status省略時は200。StatusはHTTPステータス行へ変換する |
+| [ ] | リダイレクトの範囲 | 絶対URLのLocationのみなら302。LocationにStatus・Content-Type・本文を伴う応答の扱いも固定する。ローカルLocationのみの内部リダイレクトは対象外とし、未対応の出力として502にする |
+| [ ] | 応答ヘッダー・長さ | EOFまで蓄積した本文の実長から最終Content-Lengthを生成する。CGIが長さを指定した場合は照合し、不一致は502。CGIのStatusは転送せず、Connection等の接続制御はサーバーが決める。他のヘッダーの転送規則も固定する |
+| [ ] | 終了条件・stderr | 正常完了はstdoutのEOFと子の正常終了の両方。異常終了は502とする。stderrはstdoutへ混ぜずサーバーのstderrを継承し、追加の監視パイプは作らない |
+| [ ] | タイムアウトの定義 | 起動から10秒の経過時間とし、出力が続いても延長しない。計測起点をfork成功時などに統一し、EOF後も子が終了しなければ対象とする |
+
+RFC 3875に定義された機能の一部を対象外にするため、採用後はRequirementsの「RFC 3875準拠」を「RFC 3875を参考に、対応範囲を限定」と具体化する案。課題PDFに個別の対応範囲が明記されていない機能を、課題から免除されたと断定しない。
+
+### 決めること：分担・受け渡し・数値
+
+大枠の分担はA=ネットワーク/イベントループ、B=HTTP/Config、CGIの結合は共同。下表は、その境界を具体化する**未合意の案**。
+
+| 担当案 | 責任 |
+|---|---|
+| A | pipe/fork/execve、パイプI/O、pid・fd・実行状態の所有、時間管理、子の終了・回収、切断時の後始末 |
+| B | 実行対象・パスの解決、環境変数の内容、CGI出力の解析、HTTP応答の生成 |
+| 共同 | 以下の受け渡し、エラー対応、上限値、結合テスト |
+
+- [ ] **APIと戻り値**: B→Aは実行パス・argv・環境変数・cwd・入力ボディ、A→Bは標準出力・終了理由・終了コードとする案。Routerの「即時応答/CGI実行要求」を区別する戻り値を先に確定する。RequirementsのB側 `CgiExecutor` に起動処理も含まれている点を整理する。
+- [ ] **データの寿命**: 実行中の `CgiProcess` が必要な入力を所有する案。コピー/参照の使い分け、envpの確保・解放担当、Clientとの関連付けを決める。
+- [ ] **切断・終了時の処理**: Aが監視解除・fd close・必要なkill・非ブロッキングのwaitpid回収を行う案。削除済みClientへアクセスせず、同じfdを二重に閉じない。CGIの子へ不要なソケット・パイプを引き継がない方法も確定する。
+- [ ] **子の起動失敗と時間計測**: chdir/dup2/execve失敗時の子の終了方法と親の検出方法を決める。C8にある `_exit` の許可リスト上の扱い、および時間取得方法は、課題の許可関数と照合する。失敗した子が親のイベントループへ戻らないことを確認する。
+- [ ] **エラー対応表**: 次の案を採用するか確定する。既存の「起動失敗は一律502」と差があるため、採用時にRequirementsのAPI案も更新する。
+
+| 状況 | 未確定の応答案 |
+|---|---|
+| スクリプトなし / 読み取り不可 | 404 / 403 |
+| サーバー側のpipe・fork失敗 | 500 |
+| exec失敗・子の異常終了・不正/未対応のCGI出力 | 502 |
+| CGIの出力上限超過 | 子を終了・回収して502 |
+| 10秒超過 | 子を終了・回収して504(504は既決定) |
+| 同時実行数の上限到達 | 503 |
+
+- [ ] **上限値**: 下表は初期案であり、課題指定値でも今回の承認事項でもない。入力ボディ上限は既存の `client_max_body_size` を使う。
+
+| 定数 | 未確定の初期案 |
+|---|---|
+| CGIヘッダー上限 | 8 KiB |
+| CGI出力全体の上限(ヘッダーを含むstdout) | 8 MiB |
+| CGI同時実行数の上限(サーバープロセス全体) | 16本 |
+
+- [ ] **共通の結合テスト**: GETのクエリ、POST/HTTP1.1 chunkedのボディ、cwdからの相対ファイル読み込み、パイプ容量を超える入出力、出力形式の異常、即時終了、タイムアウト、クライアント切断、各上限への到達を確認する。PATH_INFO等は合意した対応範囲に合わせて追加する。CGI実行中も静的配信でき、終了後にfdや未回収の子が残らないことを完了条件にする。
+
+### 今回参照した資料
+
+- [課題PDF Version 24.1](../webserv.pdf): 印刷ページ8のI/O・切断処理、10〜11のConfig/CGI要件。複数CGIタイプはボーナス。
+- [RFC 3875 原文](https://www.rfc-editor.org/rfc/rfc3875.html) / [日本語訳](https://tex2e.github.io/rfc-translater/html/rfc3875.html): §4の入力・環境変数、§5のNPH、§6の出力。仕様上の判断は原文を基準にする。
+- [筑波大学 2016-06-15](https://www.coins.tsukuba.ac.jp/~syspro/2016/2016-06-15/index.html): CGI側でクエリ・POST入力を処理する例。
+- [筑波大学 2022-07-20](https://www.coins.tsukuba.ac.jp/~syspro/2022/2022-07-20/index.html): 最小のCGI出力、環境変数、子プロセス回収の説明。
+- [筑波大学 2022-07-27](https://www.coins.tsukuba.ac.jp/~syspro/2022/2022-07-27/index.html): CGIプログラム側でのフォーム処理例。
+- [とほほのCGI仕様](https://www.tohoho-web.com/wwwcgi3.htm): CGIの入出力の概観。掲載された全機能を今回の必須範囲とするわけではない。
 
 ---
 
