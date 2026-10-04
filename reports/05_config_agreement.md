@@ -211,10 +211,10 @@ server {
 }
 ```
 
-### A/B間の契約と検証
+### tasugiyaとrysatoの間の契約と検証
 
-- BのConfigParserが全設定を解析し、省略された設定の既定値を補完・パス解決・検証してから、不変のConfigをAへ渡す。1つでも設定エラーがあれば設定全体を不採用とし、listenを開始しない。
-- AはServerConfigごとにlistenし、Clientにその設定を紐付ける。body上限は最初のappendDataより前にHttpRequestへ設定する。bind等の失敗で起動を中止する場合は、作成済みfdも閉じる。
+- rysatoのConfigParserが全設定を解析し、省略された設定の既定値を補完・パス解決・検証してから、不変のConfigをtasugiyaへ渡す。1つでも設定エラーがあれば設定全体を不採用とし、listenを開始しない。
+- tasugiyaはServerConfigごとにlistenし、Clientにその設定を紐付ける。body上限は最初のappendDataより前にHttpRequestへ設定する。bind等の失敗で起動を中止する場合は、作成済みfdも閉じる。
 - LocationConfigのデータ表現案は、共通の `path` / `allowedMethods` と、配信かリダイレクトかの種別を持つ。配信側は `pathMode(ROOT/ALIAS)` / `basePath` / `index` / `autoindex` / `uploadPath` / CGI設定、リダイレクト側はcode / URLを持つ。rootとaliasを区別する動作は確定済みだが、フィールド名や型は未確定。
 - `upload_store off` は空のuploadPath、`cgi_extension off` は空のcgiExtensionsとして保持できる。解析時は明示の有無を保持し、明示値を優先して省略分だけを補完する。root/alias・returnの選択後に、そのlocationで使う設定だけを補完・検証する案。独自項目の省略時offを採用した場合、完成後のConfigでは省略と明示offを同じ値にできる。
 - 文法エラーは既決定どおり、理由を表示して起動を中止する。行番号は実装しない。設定項目名と、分かる場合はserverのlisten先またはlocationをメッセージに含める。
@@ -243,7 +243,7 @@ server {
 | [ ] | allow_methodsの検証詳細、upload_storeの独自設定名・書式と、cgi_extensionの拡張子文法・指定できる組数を確定する |
 | [ ] | locationの前方一致でパス境界を考慮するか、上記の文字列前方一致案を確認する |
 | [ ] | returnを301 / 302と固定の絶対URLに限定する |
-| [ ] | 重複・数値範囲・パス存在等の起動時検証と、Configのデータ表現・A/B間のAPIを確定する |
+| [ ] | 重複・数値範囲・パス存在等の起動時検証と、Configのデータ表現・tasugiyaとrysatoの間のAPIを確定する |
 
 アップロード形式・ファイル名・上書き、URI正規化・symlinkはHTTP側の別議題として残す。CGI出力の基本動作は確定済みで、ヘッダー検証等の残る詳細は [03のC12](03_config_cgi_upload.md) に記録する。ConfigParserにそれらの処理を持たせない。
 

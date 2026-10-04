@@ -1,5 +1,15 @@
 WEBSERV
 
+担当分担
+
+| 担当者 | Requirementsの担当記号 | 主な担当 |
+|---|---|---|
+| tasugiya | A | ネットワーク層・イベントループ |
+| rysato | B | HTTP層・設定ファイル・ルーティング |
+| 両名 | 共同 | CGIの結合・共通処理 |
+
+詳細は [Requirements.md](Requirements.md) と [作業分解](reports/00_README_overview.md) を参照。CGI内の具体的な担当境界・APIは未合意の案として区別する。
+
 設定ファイル参考
 https://props-room.com/articles/handbook/nginx-guide-237
 https://qiita.com/ponponnsan/items/23e1aa6f7dd4eadde5df

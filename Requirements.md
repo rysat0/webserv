@@ -154,26 +154,28 @@ access, stat, open, opendir, readdir, closedir
 |---|---|---|
 | 開発OS | Linux | - |
 | I/O多重化 | **poll()** | 接続数規模ではO(n)で十分。APIが単純で状態機械の設計に集中できる。評価で説明しやすい |
-| 体制 | 2人分担 | A: ネットワーク層+イベントループ / B: HTTP層+設定ファイル。CGIは合流して共同 |
+| 体制 | 2人分担 | tasugiya: ネットワーク層+イベントループ / rysato: HTTP層+設定ファイル。CGIは合流して共同 |
 | norminette | 適用しない | C言語用ツールのため C++ 課題は対象外(キャンパスローカルルールは要確認) |
 
 ## モジュール分割(実装単位)
 
+担当者の対応は **A = tasugiya、B = rysato** として確定。以降の担当表・設計案は名前で表記する。「共同」はtasugiyaとrysatoの両名を指す。CGI内の担当境界・APIなど未合意の詳細は、引き続き案として扱う。
+
 | # | モジュール | 責務 | 担当 |
 |---|---|---|---|
-| 1 | ConfigParser | 設定ファイル → Config オブジェクト | B |
-| 2 | ServerSocket | Config → listen 済み fd 群 | A |
-| 3 | EventLoop | poll 本体。イベントを各所へ配送 | A |
-| 4 | Client | 接続ごとの状態機械(受信/送信バッファ) | A |
-| 5 | HttpRequest | HTTP/1.0・HTTP/1.1のバイト断片 → 完成判定+構造化(1.1のchunked受信に対応) | B |
-| 6 | Router | Request+Config → 静的/CGI/アップロード/エラー振り分け | B |
-| 7 | HttpResponse | ステータス+ヘッダー+ボディ → HTTP/1.0の送信バイト列 | B |
+| 1 | ConfigParser | 設定ファイル → Config オブジェクト | rysato |
+| 2 | ServerSocket | Config → listen 済み fd 群 | tasugiya |
+| 3 | EventLoop | poll 本体。イベントを各所へ配送 | tasugiya |
+| 4 | Client | 接続ごとの状態機械(受信/送信バッファ) | tasugiya |
+| 5 | HttpRequest | HTTP/1.0・HTTP/1.1のバイト断片 → 完成判定+構造化(1.1のchunked受信に対応) | rysato |
+| 6 | Router | Request+Config → 静的/CGI/アップロード/エラー振り分け | rysato |
+| 7 | HttpResponse | ステータス+ヘッダー+ボディ → HTTP/1.0の送信バイト列 | rysato |
 | 8 | CgiHandler | fork/execve/pipe 管理、環境変数構築 | 共同 |
 | 9 | Utils | ログ、変換系の小物 | 共同 |
 
 ## 実装順序
 
-1. ConfigParser(B)/ 最小 Hello World サーバー(A)← 並行スタート
+1. ConfigParser(rysato)/ 最小 Hello World サーバー(tasugiya)← 並行スタート
 2. EventLoop + Client(poll 化・複数接続)
 3. HttpRequest パーサー(GET+ヘッダーから。受信バージョン別のHost・Expect判定を含む)
 4. Router + HttpResponse(静的配信)← 合流ポイント
@@ -310,7 +312,7 @@ RFC 3875を参考に、対応範囲を以下に限定する。課題要件の一
 
 - [ ] 下記「Config合意案」の未チェック項目(upload_store / cgi_extensionの省略時off案・指定回数・残る文法細則・検証詳細等)を確定する。root/alias・error_page・相対パスとCGIの承認済み事項は維持する
 - [ ] HttpRequest / HttpResponse / RouterとCGI受け渡しの**具体的なシグネチャ**(メソッド名・戻り値・所有権の確定)
-- [ ] CGIの環境変数・パス正規化・出力ヘッダー検証・stderr等の残る詳細とA/B境界を [03のC12](reports/03_config_cgi_upload.md) に従って確定する
+- [ ] CGIの環境変数・パス正規化・出力ヘッダー検証・stderr等の残る詳細とtasugiyaとrysatoの担当境界を [03のC12](reports/03_config_cgi_upload.md) に従って確定する
 
 ## Config合意案(2026-10-04・一部確定)
 
@@ -494,10 +496,10 @@ server {
 }
 ```
 
-### A/B間の契約と検証
+### tasugiyaとrysatoの間の契約と検証
 
-- BのConfigParserが全設定を解析し、省略された設定の既定値を補完・パス解決・検証してから、不変のConfigをAへ渡す。1つでも設定エラーがあれば設定全体を不採用とし、listenを開始しない。
-- AはServerConfigごとにlistenし、Clientにその設定を紐付ける。body上限は最初のappendDataより前にHttpRequestへ設定する。bind等の失敗で起動を中止する場合は、作成済みfdも閉じる。
+- rysatoのConfigParserが全設定を解析し、省略された設定の既定値を補完・パス解決・検証してから、不変のConfigをtasugiyaへ渡す。1つでも設定エラーがあれば設定全体を不採用とし、listenを開始しない。
+- tasugiyaはServerConfigごとにlistenし、Clientにその設定を紐付ける。body上限は最初のappendDataより前にHttpRequestへ設定する。bind等の失敗で起動を中止する場合は、作成済みfdも閉じる。
 - LocationConfigのデータ表現案は、共通の `path` / `allowedMethods` と、配信かリダイレクトかの種別を持つ。配信側は `pathMode(ROOT/ALIAS)` / `basePath` / `index` / `autoindex` / `uploadPath` / CGI設定、リダイレクト側はcode / URLを持つ。rootとaliasを区別する動作は確定済みだが、フィールド名や型は未確定。
 - `upload_store off` は空のuploadPath、`cgi_extension off` は空のcgiExtensionsとして保持できる。解析時は明示の有無を保持し、明示値を優先して省略分だけを補完する。root/alias・returnの選択後に、そのlocationで使う設定だけを補完・検証する案。独自項目の省略時offを採用した場合、完成後のConfigでは省略と明示offを同じ値にできる。
 - 文法エラーは既決定どおり、理由を表示して起動を中止する。行番号は実装しない。設定項目名と、分かる場合はserverのlisten先またはlocationをメッセージに含める。
@@ -526,7 +528,7 @@ server {
 | [ ] | allow_methodsの検証詳細、upload_storeの独自設定名・書式と、cgi_extensionの拡張子文法・指定できる組数を確定する |
 | [ ] | locationの前方一致でパス境界を考慮するか、上記の文字列前方一致案を確認する |
 | [ ] | returnを301 / 302と固定の絶対URLに限定する |
-| [ ] | 重複・数値範囲・パス存在等の起動時検証と、Configのデータ表現・A/B間のAPIを確定する |
+| [ ] | 重複・数値範囲・パス存在等の起動時検証と、Configのデータ表現・tasugiyaとrysatoの間のAPIを確定する |
 
 アップロード形式・ファイル名・上書き、URI正規化・symlinkはHTTP側の別議題として残す。CGI出力の基本動作は確定済みで、ヘッダー検証等の残る詳細は [03のC12](reports/03_config_cgi_upload.md) に記録する。ConfigParserにそれらの処理を持たせない。
 
@@ -545,7 +547,7 @@ server {
 
 ## 一覧と責務
 
-### 設定ドメイン(B担当)
+### 設定ドメイン(rysato担当)
 
 | クラス | 責務 | 生成タイミング |
 |---|---|---|
@@ -556,7 +558,7 @@ server {
 
 ※ Config 系3クラスは読み取り専用の構造体(ロジックは持たない)。
 
-### ネットワーク/イベントドメイン(A担当)
+### ネットワーク/イベントドメイン(tasugiya担当)
 
 | クラス | 責務 | 生成タイミング |
 |---|---|---|
@@ -565,7 +567,7 @@ server {
 | `Client` | 接続1本の状態機械(バッファ・状態・最終活動時刻) | accept 時に生成 / close 時に破棄 |
 | `CgiProcess` | 実行中 CGI 1本の状態(pid・パイプfd・バッファ・開始時刻・EOF/終了の確認・失敗理由) | CGI開始時に生成 / 出力の処理・子の回収・結果受け渡し・後始末が済んだ後に破棄 |
 
-### HTTPドメイン(B担当)
+### HTTPドメイン(rysato担当)
 
 | クラス | 責務 |
 |---|---|
@@ -577,7 +579,7 @@ server {
 
 | クラス/表 | 責務 |
 |---|---|
-| `CgiExecutor` | pipe/fork/dup2/chdir/execveによる起動と環境変数の受け渡し。Aがプロセス制御、Bが環境変数の内容を担当する案。具体的な境界・APIは03のC12で確定する |
+| `CgiExecutor` | pipe/fork/dup2/chdir/execveによる起動と環境変数の受け渡し。tasugiyaがプロセス制御、rysatoが環境変数の内容を担当する案。具体的な境界・APIは03のC12で確定する |
 | `Logger` | `info/warn/error`。レベルフィルタ。ファイル出力なし |
 | MIME タイプ表 | 拡張子→Content-Type。static 関数1個 |
 | ステータスコード表 | code→文言。HttpResponse 内の static 関数 |
@@ -610,13 +612,13 @@ public:
 
     HttpRequest();
 
-    // Client(A側)が呼ぶ
+    // Client(tasugiya側)が呼ぶ
     void   appendData(const char* data, size_t len);  // recv 断片を投入
     State  getState() const;
     int    getErrorCode() const;      // ERROR 時: 400, 413, 417, 501 など
     void   setMaxBodySize(size_t n);  // Config の値を注入(早期413判定)
 
-    // Router(B側)が COMPLETE 後に呼ぶ
+    // Router(rysato側)が COMPLETE 後に呼ぶ
     const std::string& getMethod() const;
     const std::string& getPath() const;         // ? 以降除去済み
     const std::string& getQueryString() const;  // ? の後ろ、生のまま
@@ -674,7 +676,7 @@ class Config {
 };
 ```
 
-### EventLoop / Client / CgiProcess(A側内部)
+### EventLoop / Client / CgiProcess(tasugiya側内部)
 
 ```cpp
 class EventLoop {

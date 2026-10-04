@@ -1,4 +1,4 @@
-# 01 HTTPプロトコル — 理解すべきこと(主担当: B、一部共同)
+# 01 HTTPプロトコル — 理解すべきこと(主担当: rysato、一部共同)
 
 一次情報: RFC 9112(メッセージ構文)、RFC 9110(意味論)、RFC 3986(URI)、RFC 1945(HTTP/1.0)。
 
@@ -6,7 +6,7 @@
 
 ---
 
-## H1 メッセージの構造 【B(主)/共, R:M, D:M, ★★★】
+## H1 メッセージの構造 【rysato(主)/共, R:M, D:M, ★★★】
 
 **理解すべきこと**
 - メッセージ = `start-line CRLF *(field-line CRLF) CRLF [message-body]`(RFC 9112 §2.1)。
@@ -19,7 +19,7 @@
 
 **調べる時の落とし穴**: 旧RFC(7230)の用語と混在した記事が多い。obs-fold(行折り返し)は9112では**拒否または空白置換**と規定されている。
 
-## H2 リクエスト行・URI・パス処理 【B, R:M, D:M, ★★★】
+## H2 リクエスト行・URI・パス処理 【rysato, R:M, D:M, ★★★】
 
 **理解すべきこと**
 - request-target の4形式(origin-form / absolute-form / authority-form / asterisk-form、§3.2)。本課題では **origin-form(`/path?query`)が主**。absolute-form(プロキシ用だが1.1サーバーは受理必須とされる)の扱いを決める。
@@ -31,7 +31,7 @@
 
 **資料化する内容**: URIの分解手順、正規化アルゴリズム(擬似コード不要・規則の列挙で可)、トラバーサル攻撃のテストパターン一覧。
 
-## H3 ヘッダーフィールド規則 【B, R:M, D:S, ★★★】
+## H3 ヘッダーフィールド規則 【rysato, R:M, D:S, ★★★】
 
 **理解すべきこと**
 - フィールド名は大小無視(§5.1)、`name:` の直前に空白は不可(あれば400)、値の前後 OWS は除去。
@@ -40,7 +40,7 @@
 - 想定する主なリクエストヘッダー: `Host, Content-Length, Content-Type, Transfer-Encoding, Connection, Expect, Cookie, User-Agent, Accept*`。サーバーが**解釈するもの/無視するもの**の一覧を作る。
 - 未知ヘッダーをHTTP処理で解釈する必要はない。CGIの `HTTP_*` に渡すヘッダーの範囲・例外・重複時の扱いは[03 C12](03_config_cgi_upload.md)で引き続き確定する。全ヘッダーを無条件で転送する決定ではない。
 
-## H4 ボディ長の決定 【B(主)/A, R:L, D:M, ★★★】
+## H4 ボディ長の決定 【rysato(主)/tasugiya, R:L, D:M, ★★★】
 
 **理解すべきこと**(RFC 9112 §6)
 - HTTP/1.1リクエストでは、`Transfer-Encoding: chunked` または `Content-Length` でボディを区切る。HTTP/1.0のボディ付き要求はContent-Lengthを使い、Transfer-Encoding付きは400で切断する。**レスポンスと違い、リクエストに「接続を閉じるまで読む」はない**。
@@ -51,9 +51,9 @@
 - POST で Content-Length も chunked も無い場合 → 411(Length Required)か、ボディ0扱いかを決める。
 - HEAD/GET のレスポンスと `Content-Length` の関係、1xx/204/304 はボディ禁止(§6.3)。
 
-**重複理解点(A↔B)**: Client(A)は `appendData` のたびにエラーを確認し、COMPLETEになるまでエラー応答を待たない。完了・エラーの具体的な問い合わせAPIは未確定。1要求完成後の余剰バイトを次の要求として処理しない方針は確定済み。
+**重複理解点(tasugiya↔rysato)**: Client(tasugiya)は `appendData` のたびにエラーを確認し、COMPLETEになるまでエラー応答を待たない。完了・エラーの具体的な問い合わせAPIは未確定。1要求完成後の余剰バイトを次の要求として処理しない方針は確定済み。
 
-## H5 chunked 転送コーディング 【B, R:M, D:M, ★★】
+## H5 chunked 転送コーディング 【rysato, R:M, D:M, ★★】
 
 **理解すべきこと**(RFC 9112 §7.1)
 - 形式: `chunk-size(16進) [;chunk-ext] CRLF chunk-data CRLF` を繰り返し、`0 CRLF [trailer-section] CRLF` で終端。
@@ -63,7 +63,7 @@
 - 累積サイズが上限超過した時点の 413。
 - **レスポンス側のchunkedは対象外と確定済み**。HTTP/1.0応答を一括生成し、通常の本文付き応答には本文のバイト数からContent-Lengthを付ける。204は本文もContent-Lengthも出力しない。
 
-## H6 メソッドの意味 【B, R:M, D:M, ★★★】
+## H6 メソッドの意味 【rysato, R:M, D:M, ★★★】
 
 | メソッド | 理解すべき点 |
 |---|---|
@@ -79,7 +79,7 @@ locationの `allow_methods` 省略時はGETのみ許可する(確定、05のC-06
 
 **資料化する内容**: 「メソッド × 対象種別(ファイル/ディレクトリ/CGI/存在しない) × location設定」のマトリクスと返却ステータス。これがRouter仕様の核になる。
 
-## H7 ステータスコード整理 【B(主)/共, R:L, D:L, ★★★】
+## H7 ステータスコード整理 【rysato(主)/共, R:L, D:L, ★★★】
 
 決定事項「主要コードを網羅的に実装(基本全部)」に対し、**まず分類して、サーバーが能動的に生成するコードを確定する**ことが必要。RFC 9110 §15 が一次情報。
 
@@ -114,7 +114,7 @@ locationの `allow_methods` 省略時はGETのみ許可する(確定、05のC-06
 
 CGIのエラー対応は確定済み。スクリプトなしは404、読み取り不可は403。1件あたりヘッダー8 KiB、ヘッダーを含むstdout全体8 MiBを読み取り中に検査し、超過時は打ち切って502とする。CGI同時実行数に独自上限は設けず、件数による503や待ち行列も設けない。OS資源不足によるpipe/fork失敗は500。タイムアウト後に子が異常終了しても504を502へ上書きしない。
 
-## H8 レスポンスヘッダー 【B, R:M, D:M, ★★】
+## H8 レスポンスヘッダー 【rysato, R:M, D:M, ★★】
 
 - 必須/推奨: `Date`(**IMF-fixdate** 形式 `Sun, 06 Nov 1994 08:49:37 GMT`、RFC 9110 §5.6.7。`strftime`+GMT 固定。ロケール依存に注意)、`Server`、`Content-Type`、`Content-Length`、`Connection`。
 - 状況別: `Location`(3xx/201)、`Allow`(405/OPTIONS)、`Last-Modified`(静的ファイル。任意)。
@@ -134,12 +134,12 @@ CGIのエラー対応は確定済み。スクリプトなしは404、読み取�
 - HTTP/1.1のExpect付き要求は、値によらずヘッダー完了時点で417とし、ボディを待たない。先に確定した400/413等があればそちらを優先する。100 Continueは実装しない。HTTP/1.0の `Expect: 100-continue` は無視して通常処理し、その他のExpect値は未決定。
 - ブラウザの挙動: 複数接続の並列オープン、空接続(データを送らず接続だけ張る投機接続)がある → 受信タイムアウトとの関係。
 
-## H10 MIMEタイプ 【B, R:S, D:S, ★★】
+## H10 MIMEタイプ 【rysato, R:S, D:S, ★★】
 
 - 拡張子→Content-Type 表(`.html .css .js .json .txt .png .jpg .gif .svg .ico .pdf .xml` 等)の策定。未知は `application/octet-stream`。
 - `Content-Type` が誤ると**ブラウザで表示/DLの挙動が変わる**(課題の「完全な静的サイト配信」に直結)。
 
-## H11 リダイレクト 【B, R:S, D:S, ★★】
+## H11 リダイレクト 【rysato, R:S, D:S, ★★】
 
 - 301(恒久・メソッド変更の曖昧さ)/302/303(GETへ変更)/307/308(メソッド維持)の違い(RFC 9110 §15.4)。設定ディレクティブで**ステータスコードを指定可能にするか**を決める(例: `return 301 /new;` 相当)。
 - `Location` は絶対URIでも相対参照でも可(9110 §10.2.2)。ディレクトリへ末尾`/`なしでアクセスしたときの補完リダイレクト(nginxは301)を仕様に含めるか。

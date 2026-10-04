@@ -1,4 +1,4 @@
-# 02 ネットワーク・I/O — 理解すべきこと(主担当: A、一部共同)
+# 02 ネットワーク・I/O — 理解すべきこと(主担当: tasugiya、一部共同)
 
 一次情報: `man 2 socket/bind/listen/accept/recv/send/poll/fcntl/shutdown/waitpid/signal`, `man 7 socket/tcp/pipe/signal`, `man 3 getaddrinfo`。
 
@@ -6,7 +6,7 @@
 
 ---
 
-## N1 TCP/ソケットAPI 【A, R:M, D:M, ★★★】
+## N1 TCP/ソケットAPI 【tasugiya, R:M, D:M, ★★★】
 
 **理解すべきこと**
 - サーバー側の流れ: `socket` → `setsockopt(SO_REUSEADDR)` → `bind` → `listen` → `accept`。各ステップの失敗時の扱い(**起動時の失敗のみ例外/終了可**、という決定事項との整合)。
@@ -18,7 +18,7 @@
 
 > 要確認: 許可関数一覧に `inet_ntoa`/`inet_ntop`/`inet_addr` は**含まれない**。`REMOTE_ADDR` の文字列化は `ntohl` で自前変換する等、制約下の方法を仕様で決める。
 
-## N2 アドレス解決・複数listen 【A, R:M, D:S, ★★★】
+## N2 アドレス解決・複数listen 【tasugiya, R:M, D:S, ★★★】
 
 - `getaddrinfo`/`freeaddrinfo`/`gai_strerror` の使い方(`AI_PASSIVE`、`host` 省略時 = 全インターフェース)。IPv4のみにするか(`AF_INET`固定が単純)。
 - 設定の `listen host:port` を複数持つ場合:
@@ -26,7 +26,7 @@
   - `0.0.0.0:8080` と `127.0.0.1:8080` の併記も、Config合意案では設定エラーとする案。重複・競合の検証規則を確定する。
 - **接続→どの ServerConfig か**の紐付け(accept元のlistenソケットから引く)。Client が `ServerConfig*` を保持する設計(Requirements.md の通り)の前提。
 
-## N3 poll() の厳密な意味 【A(主)/共, R:L, D:L, ★★★】
+## N3 poll() の厳密な意味 【tasugiya(主)/共, R:L, D:L, ★★★】
 
 **理解すべきこと**
 - `struct pollfd { fd; events; revents; }`。`events` は監視したい条件(POLLIN/POLLOUT)、`revents` は結果。**POLLHUP/POLLERR/POLLNVAL は events に指定しなくても revents に出る**。
@@ -42,7 +42,7 @@
 
 **資料化する内容**: 「fdの種類(listen/client/CGI stdin/CGI stdout)× 状態 × 監視するイベント」の対応表。毎周の再構築ロジックの仕様の根拠になる。
 
-## N4 ノンブロッキングI/Oとバッファ 【A(主)/共, R:L, D:L, ★★★】
+## N4 ノンブロッキングI/Oとバッファ 【tasugiya(主)/共, R:L, D:L, ★★★】
 
 **理解すべきこと**
 - `fcntl(fd, F_SETFL, O_NONBLOCK)`(Linux)。ソケットと、親サーバーが扱うCGI用パイプ端に設定する。CGIのstdin/stdout自体をノンブロッキングにする意味ではない。`accept` で得たソケットにも個別に設定する。
@@ -60,7 +60,7 @@
 - EOFと子の終了の両方を確認してからHTTP応答を生成する。子が終了しただけで未読出力を捨てず、EOFだけで処理完了にもしない。ブラウザへの逐次転送はしない。
 - CGI出力にContent-Lengthがあっても上記の完了条件を使う。本文の実長との照合を行い、不一致は502。指定がなければ実長からHTTP応答の長さを生成する。204等の本文・Content-Lengthを禁止するHTTP規則は維持する。
 
-## N5 errno禁止制約下のエラー処理方針 【A(主)/共, R:M, D:M, ★★★】
+## N5 errno禁止制約下のエラー処理方針 【tasugiya(主)/共, R:M, D:M, ★★★】
 
 課題要件: **read/write(recv/send)後に errno を見て挙動を変えてはならない**。違反は0点扱い。
 
@@ -75,14 +75,14 @@
 
 > 重要な論点(未決): 「poll→1回read」で本当に取りこぼし/ハングが起きないか(特にエッジケース)を、仕様段階で表にして検証する。
 
-## N6 クライアント切断・SIGPIPE・shutdown 【A, R:M, D:S, ★★★】
+## N6 クライアント切断・SIGPIPE・shutdown 【tasugiya, R:M, D:S, ★★★】
 
 - 切断の種類: 正常close(recvが0)、リセット(RST、recv/sendが-1)、半クローズ(クライアントが書き込み側だけ閉じてレスポンスを待つ)。HTTPサーバーとしては「リクエスト受信完了前のEOF → 破棄」「受信完了後のEOF → レスポンスは送る/捨てる」の方針を決める。
 - **SIGPIPE**: 閉じた相手にsendするとデフォルトでプロセスが死ぬ → 決定事項どおり `SIG_IGN`。`send(..., MSG_NOSIGNAL)` の併用も可(要確認: フラグ使用が許可されるか。signal 無視で足りるので不要)。
 - `close` と `shutdown(SHUT_WR)` の違い。**レスポンス送信後にcloseする際、未送信データ/未読受信データがあるとRSTが飛び、クライアントが応答を取りこぼす**問題(特に413等の早期エラー応答で、受信が残っている場合)。これを避ける手順(`shutdown(SHUT_WR)` 後に読み捨て、など)を調べる。
 - 切断されたClientに紐づく **CGIプロセスの後始末**(kill・waitpid・パイプclose)。リーク防止のため仕様に明記。
 
-## N7 タイムアウト設計 【A, R:S, D:S, ★★】
+## N7 タイムアウト設計 【tasugiya, R:S, D:S, ★★】
 
 - 決定事項: 一般のタイムアウトは60秒。CGIは**起動からの経過時間10秒**で打ち切り504とする。途中で出力があっても期限を延長せず、EOF後に子が終了しない場合も時間制限の対象とする。
 - 理解/決定すべきこと: **何を起点に60秒か**(最終アクティビティ時刻。リクエスト受信中/アイドル/レスポンス送信中で分けるか)、時計の選択(`time(NULL)` は許可関数外のため確認が必要。許可リストに `time/gettimeofday/clock_gettime` が**見当たらない** → **要確認**。Logger の `[日時]` 出力と合わせて使用可否を課題/評価基準で確認)。
@@ -91,7 +91,7 @@
 
 > **確認事項**: 許可外の関数(`time`, `strftime`, `localtime`, `gettimeofday` 等)を使えるかを明確にする。Requirements.md の許可関数リストには時刻関数がないが、HTTPの `Date` ヘッダーとログ時刻、タイムアウトに時刻が必須。評価基準・教員/運営への確認が必要。これは**実装前に必ず解決すべき論点**。
 
-## N8 シグナル 【A, R:M, D:S, ★★】
+## N8 シグナル 【tasugiya, R:M, D:S, ★★】
 
 - `signal()` のみ許可(`sigaction` は許可外)。ハンドラ内で安全にできること(**`volatile sig_atomic_t` フラグ設定のみ**)。
 - SIGINT: フラグ方式のグレースフル終了(決定済み)。pollがEINTRで返る → フラグ確認 → cleanup。
@@ -99,7 +99,7 @@
 - SIGCHLD: CGI終了の検知を `waitpid(pid, &st, WNOHANG)` の定期ポーリングにするか、SIGCHLD を使うか。ゾンビプロセス防止。
 - 子プロセス(CGI)側でのシグナルのデフォルト復元(`SIG_IGN` は execve を越えて継承される!→ 子で SIGPIPE を `SIG_DFL` に戻す必要の有無を確認)。
 
-## N9 リソース管理・クラッシュ防止 【A(主)/共, R:M, D:M, ★★★】
+## N9 リソース管理・クラッシュ防止 【tasugiya(主)/共, R:M, D:M, ★★★】
 
 - 「どんな状況でもクラッシュ禁止」(メモリ不足含む)への設計: 
   - 例外方針(決定済み): ループ内は戻り値方式 + `catch(std::exception&)` の防波堤、`bad_alloc` もここで受ける。
@@ -107,7 +107,7 @@
   - ゼロ除算、範囲外アクセス、NULL参照、`std::string::substr` の例外(`out_of_range`)など、C++98特有のクラッシュ要因の洗い出し。
 - fd管理: 上限(`ulimit -n`)、`EMFILE` 対策、CGI用pipe/子プロセス側での不要fdクローズ(`FD_CLOEXEC` は `fcntl` で許可される範囲か確認)。
 - **CGI同時実行数にアプリケーション独自の上限は設けない**。件数を理由に503を返す分岐や待ち行列も設けない。これはCGI 1件ごとの出力サイズ上限・10秒の時間制限を撤廃する意味ではない。一般のクライアント接続数上限は別途未決定。
-- CGIの起動・実行失敗は原因を区別する。スクリプトなし404、読み取り不可403、サーバー側のpipe/fork失敗500、exec失敗・子の異常終了・不正出力502。OS資源不足でpipe/forkが失敗した場合も500とし、途中まで作ったfd等を回収する。失敗理由をA/B間で受け渡すAPIは未確定。
+- CGIの起動・実行失敗は原因を区別する。スクリプトなし404、読み取り不可403、サーバー側のpipe/fork失敗500、exec失敗・子の異常終了・不正出力502。OS資源不足でpipe/forkが失敗した場合も500とし、途中まで作ったfd等を回収する。失敗理由をtasugiyaとrysatoの間で受け渡すAPIは未確定。
 - 長時間稼働でのメモリ/fdリーク検証方法(`valgrind`, `lsof`, `/proc/PID/fd`)→ 04。
 
 ## N10 通常ファイルI/O 【共, R:S, D:S, ★★】
@@ -123,6 +123,6 @@
 | 区分 | 量 | コメント |
 |---|---|---|
 | N1–N2 | M | man を読めば足りる。短時間で資料化可 |
-| N3–N5 | XL | 仕様化で最も判断が多い。**errno制約の下での設計**はAの最重要資料 |
+| N3–N5 | XL | 仕様化で最も判断が多い。**errno制約の下での設計**はtasugiyaの最重要資料 |
 | N6–N9 | M〜L | 小項目が多い。表にまとめやすい |
 | 要確認事項(許可関数/時刻) | S | ただし**回答が遅れると他の設計に影響**するので最優先で確認 |

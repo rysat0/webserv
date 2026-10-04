@@ -1,6 +1,6 @@
 # 実装前に理解すべきこと・作業分解 — 全体像
 
-> 対象: webserv(C++98 HTTPサーバー)。`Requirements.md` の要件とチーム決定(担当A=ネットワーク/イベントループ、B=HTTP層/設定、CGIは共同)を前提に、
+> 対象: webserv(C++98 HTTPサーバー)。`Requirements.md` の要件とチーム決定(担当tasugiya=ネットワーク/イベントループ、rysato=HTTP層/設定、CGIは共同)を前提に、
 > **実装に入る前の「調査 → 仕様作成」フェーズ**で必要な理解事項と作業量を整理したもの。確定事項と、これから合意する仕様・設計案を分けて扱う。
 
 実装する範囲は [Requirements.md](../Requirements.md) を基準にする。HTTP/1.0で応答し、HTTP/1.0と必要なHTTP/1.1要求を受理する。1接続1要求・`Connection: close` とし、keep-aliveとパイプライン処理は対象外。HTTP/1.1のchunked入力の復号は実装する。
@@ -20,7 +20,7 @@
 
 ## 凡例
 
-- **担当**: `A`=ネットワーク/イベントループ、`B`=HTTP/設定、`共`=両者が理解必須(重複部分)。
+- **担当**: `tasugiya`(従来のA)=ネットワーク/イベントループ、`rysato`(従来のB)=HTTP/設定、`共`=両者が理解必須(重複部分)。CGI内の具体的な担当境界は03の案に従って別途確定する。
 - **調査量(R)** / **資料化量(D)**: 1人が一次情報を読んで理解する時間 / 理解した内容を仕様書(md)に落とす時間。
   - `S`≈1–2h、`M`≈3–5h、`L`≈6–10h、`XL`≈10h超。**あくまで目安**(RFCを初見で読む前提の粗い見積もり。実際は着手後に補正する)。
 - **優先度**: `★★★`=ここが決まらないと他が止まる/0点リスク、`★★`=必須機能に直結、`★`=あると良い/後回し可。
@@ -47,38 +47,38 @@
 
 | ID | トピック | 担当 | R | D | 優先度 | 詳細 |
 |---|---|---|---|---|---|---|
-| H1 | HTTPメッセージの構造(start-line/headers/body、CRLF、改行寛容) | B(主)/共 | M | M | ★★★ | 01 |
-| H2 | リクエスト行・URI・パーセントデコード・パス正規化 | B | M | M | ★★★ | 01 |
-| H3 | ヘッダー規則(大小無視、OWS、重複、必須Host) | B | M | S | ★★★ | 01 |
-| H4 | ボディ長の決定(Content-Length / chunked / 両方指定の扱い) | B(主)/A | L | M | ★★★ | 01 |
-| H5 | chunked transfer coding | B | M | M | ★★ | 01 |
-| H6 | メソッドの意味(GET/HEAD/POST/DELETE、冪等性、405/Allow) | B | M | M | ★★★ | 01 |
-| H7 | **ステータスコード全体整理** | B(主)/共 | L | L | ★★★ | 01 |
-| H8 | レスポンス必須/推奨ヘッダー(Date, Server, Content-Type/Length, Location, Allow) | B | M | M | ★★ | 01 |
+| H1 | HTTPメッセージの構造(start-line/headers/body、CRLF、改行寛容) | rysato(主)/共 | M | M | ★★★ | 01 |
+| H2 | リクエスト行・URI・パーセントデコード・パス正規化 | rysato | M | M | ★★★ | 01 |
+| H3 | ヘッダー規則(大小無視、OWS、重複、必須Host) | rysato | M | S | ★★★ | 01 |
+| H4 | ボディ長の決定(Content-Length / chunked / 両方指定の扱い) | rysato(主)/tasugiya | L | M | ★★★ | 01 |
+| H5 | chunked transfer coding | rysato | M | M | ★★ | 01 |
+| H6 | メソッドの意味(GET/HEAD/POST/DELETE、冪等性、405/Allow) | rysato | M | M | ★★★ | 01 |
+| H7 | **ステータスコード全体整理** | rysato(主)/共 | L | L | ★★★ | 01 |
+| H8 | レスポンス必須/推奨ヘッダー(Date, Server, Content-Type/Length, Location, Allow) | rysato | M | M | ★★ | 01 |
 | H9 | 接続管理(Connection, keep-alive, 1.0/1.1差、Expect: 100-continue) | 共 | M | M | ★★ | 01 |
-| H10 | MIMEタイプ表・Content-Type | B | S | S | ★★ | 01 |
-| H11 | リダイレクト(301/302/303/307/308の違い) | B | S | S | ★★ | 01 |
-| N1 | TCP/ソケットAPI(socket/bind/listen/accept、SO_REUSEADDR、backlog) | A | M | M | ★★★ | 02 |
-| N2 | `getaddrinfo` / host:port 解釈、複数listen、同一ポートの重複扱い | A | M | S | ★★★ | 02 |
-| N3 | **poll() の厳密な意味(revents、POLLHUP/ERR/NVAL)** | A(主)/共 | L | L | ★★★ | 02 |
-| N4 | ノンブロッキングI/O、部分read/write、バッファ設計 | A(主)/共 | L | L | ★★★ | 02 |
-| N5 | **errno禁止制約下のエラー処理方針** | A(主)/共 | M | M | ★★★ | 02 |
-| N6 | クライアント切断・半クローズ・shutdown・SIGPIPE | A | M | S | ★★★ | 02 |
-| N7 | タイムアウト設計(一般60s/CGIは起動から10s・延長なし)、時刻管理 | A | S | S | ★★ | 02 |
-| N8 | シグナル(SIGINT グレースフル終了、SIGPIPE、SIGCHLD) | A | M | S | ★★ | 02 |
-| N9 | fd・メモリのリーク/上限(EMFILE、bad_alloc)、クラッシュ防止 | A(主)/共 | M | M | ★★★ | 02 |
+| H10 | MIMEタイプ表・Content-Type | rysato | S | S | ★★ | 01 |
+| H11 | リダイレクト(301/302/303/307/308の違い) | rysato | S | S | ★★ | 01 |
+| N1 | TCP/ソケットAPI(socket/bind/listen/accept、SO_REUSEADDR、backlog) | tasugiya | M | M | ★★★ | 02 |
+| N2 | `getaddrinfo` / host:port 解釈、複数listen、同一ポートの重複扱い | tasugiya | M | S | ★★★ | 02 |
+| N3 | **poll() の厳密な意味(revents、POLLHUP/ERR/NVAL)** | tasugiya(主)/共 | L | L | ★★★ | 02 |
+| N4 | ノンブロッキングI/O、部分read/write、バッファ設計 | tasugiya(主)/共 | L | L | ★★★ | 02 |
+| N5 | **errno禁止制約下のエラー処理方針** | tasugiya(主)/共 | M | M | ★★★ | 02 |
+| N6 | クライアント切断・半クローズ・shutdown・SIGPIPE | tasugiya | M | S | ★★★ | 02 |
+| N7 | タイムアウト設計(一般60s/CGIは起動から10s・延長なし)、時刻管理 | tasugiya | S | S | ★★ | 02 |
+| N8 | シグナル(SIGINT グレースフル終了、SIGPIPE、SIGCHLD) | tasugiya | M | S | ★★ | 02 |
+| N9 | fd・メモリのリーク/上限(EMFILE、bad_alloc)、クラッシュ防止 | tasugiya(主)/共 | M | M | ★★★ | 02 |
 | N10 | 通常ファイルI/Oの扱い(pollが不要な範囲と大容量ファイルの扱い) | 共 | S | S | ★★ | 02 |
-| C1 | 設定ファイル文法(基本文法確定・クォート等は対象外、残る細則は05) | B | M | L | ★★★ | 03 |
-| C2 | ディレクティブ一覧(必須/任意、型、検証規則)※一部確定、詳細は05 | B(主)/共 | M | L | ★★★ | 03 |
-| C3 | location 最長前方一致・root/alias 変換・パス結合 | B | M | M | ★★★ | 03 |
-| C4 | 静的ファイル配信(stat/access、ディレクトリ→index、権限エラーの対応) | B | M | M | ★★★ | 03 |
-| C5 | autoindex(opendir/readdir、HTMLエスケープ) | B | S | S | ★★ | 03 |
-| C6 | アップロード(multipart/form-data パース、保存先、サイズ制限) | B | L | L | ★★★ | 03 |
-| C7 | DELETE の挙動設計 | B | S | S | ★★ | 03 |
-| C8 | **CGIプロセス制御**(pipe/fork/dup2/execve/chdir、fd継承、waitpid、kill) | A(主)/共 | L | L | ★★★ | 03 |
-| C9 | **CGI仕様(RFC 3875を参考に範囲限定)**: 環境変数、PATH_INFO、応答パース(Status/Location) | B(主)/共 | L | L | ★★★ | 03 |
+| C1 | 設定ファイル文法(基本文法確定・クォート等は対象外、残る細則は05) | rysato | M | L | ★★★ | 03 |
+| C2 | ディレクティブ一覧(必須/任意、型、検証規則)※一部確定、詳細は05 | rysato(主)/共 | M | L | ★★★ | 03 |
+| C3 | location 最長前方一致・root/alias 変換・パス結合 | rysato | M | M | ★★★ | 03 |
+| C4 | 静的ファイル配信(stat/access、ディレクトリ→index、権限エラーの対応) | rysato | M | M | ★★★ | 03 |
+| C5 | autoindex(opendir/readdir、HTMLエスケープ) | rysato | S | S | ★★ | 03 |
+| C6 | アップロード(multipart/form-data パース、保存先、サイズ制限) | rysato | L | L | ★★★ | 03 |
+| C7 | DELETE の挙動設計 | rysato | S | S | ★★ | 03 |
+| C8 | **CGIプロセス制御**(pipe/fork/dup2/execve/chdir、fd継承、waitpid、kill) | tasugiya(主)/共 | L | L | ★★★ | 03 |
+| C9 | **CGI仕様(RFC 3875を参考に範囲限定)**: 環境変数、PATH_INFO、応答パース(Status/Location) | rysato(主)/共 | L | L | ★★★ | 03 |
 | C10 | CGIとイベントループの統合(pipeをpoll、stdoutのEOFと子の終了を確認、復号済みボディ投入) | 共 | M | M | ★★★ | 03 |
-| C11 | Cookie/セッション(ボーナス資料。必須範囲外) | B | M | M | ★ | 03 |
+| C11 | Cookie/セッション(ボーナス資料。必須範囲外) | rysato | M | M | ★ | 03 |
 | T1 | テスト手法・ツール(telnet/nc/curl/ab/siege/自作スクリプト) | 共 | M | M | ★★ | 04 |
 | T2 | nginx との挙動比較手順 | 共 | S | S | ★★ | 04 |
 
@@ -90,15 +90,15 @@
 2. **H4/H5 ボディ長決定とchunked** — 仕様の読み込みが必要で、リクエストスマグリング絡みの規則(CL+TE同時指定など)がある。
 3. **N3–N5 poll/ノンブロッキング/errno禁止** — 課題の0点条件に直結。「errnoを見ずにEAGAIN等をどう扱うか」の方針は設計で決め打ちが必要。
 4. **C6 アップロード** — multipartのboundary処理は仕様の細部が多い(ボディ全体をメモリに持つか等の設計判断を含む)。
-5. **C8–C10 CGI** — プロセス制御(A寄り)と仕様(B寄り)の両面があり、共同箇所のため調査を分担して要点共有しないと重複する。
+5. **C8–C10 CGI** — プロセス制御(tasugiya寄り)と仕様(rysato寄り)の両面があり、共同箇所のため調査を分担して要点共有しないと重複する。
 
 ## 重複部分(両者が共通理解を持つべき範囲)
 
 | 共通理解 | 理由 |
 |---|---|
-| ボディ長決定とバッファの責務境界(H4 ↔ N4) | AはバイトをためてBのパーサーに渡す側、Bは完成判定側。境界(「どこまで読めばリクエスト完了か」)が食い違うと結合で破綻する |
-| ステータスコードの発生箇所(H7) | 要求の400/413/417、ルート解決の404/403/405、CGIのpipe/fork失敗500・exec失敗/異常終了/不正出力502・時間超過504などを区別する。makeErrorでの生成は一元化し、具体的なA/B間の失敗理由の受け渡しは確定する |
-| CGI(C8–C10) | 決定事項で「共同」。起動(A)と仕様・環境変数(B)を分けて調べ、結合部(pipe の fd を誰が poll するか)で合意する |
+| ボディ長決定とバッファの責務境界(H4 ↔ N4) | tasugiyaはバイトをためてrysatoのパーサーに渡す側、rysatoは完成判定側。境界(「どこまで読めばリクエスト完了か」)が食い違うと結合で破綻する |
+| ステータスコードの発生箇所(H7) | 要求の400/413/417、ルート解決の404/403/405、CGIのpipe/fork失敗500・exec失敗/異常終了/不正出力502・時間超過504などを区別する。makeErrorでの生成は一元化し、具体的なtasugiyaとrysatoの間の失敗理由の受け渡しは確定する |
+| CGI(C8–C10) | 決定事項で「共同」。起動(tasugiya)と仕様・環境変数(rysato)を分けて調べ、結合部(pipe の fd を誰が poll するか)で合意する |
 | エラー時の接続処理(N5/N6 ↔ H9) | 1接続1要求・応答後closeは確定済み。未受信ボディの読み捨て、shutdown、closeの具体的な手順は両者で揃える |
 
 ## 進め方(推奨)
