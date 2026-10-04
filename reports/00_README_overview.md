@@ -1,7 +1,11 @@
 # 実装前に理解すべきこと・作業分解 — 全体像
 
 > 対象: webserv(C++98 HTTPサーバー)。`Requirements.md` の要件とチーム決定(担当A=ネットワーク/イベントループ、B=HTTP層/設定、CGIは共同)を前提に、
-> **実装に入る前の「調査 → 仕様作成」フェーズ**で必要な理解事項と作業量を整理したもの。実装方法そのものは対象外。
+> **実装に入る前の「調査 → 仕様作成」フェーズ**で必要な理解事項と作業量を整理したもの。確定事項と、これから合意する仕様・設計案を分けて扱う。
+
+実装する範囲は [Requirements.md](../Requirements.md) を基準にする。HTTP/1.0で応答し、HTTP/1.0と必要なHTTP/1.1要求を受理する。1接続1要求・`Connection: close` とし、keep-aliveとパイプライン処理は対象外。HTTP/1.1のchunked入力の復号は実装する。
+
+必須部分のCGIはPythonのみ。RFC 3875を参考に対応範囲を限定し、確定事項と残る論点は [03のC12](03_config_cgi_upload.md) に整理する。Configはroot/aliasの区別、error_pageのファイル直接指定、設定ファイル基準の相対パス、限定文法5点、省略時のNGINX既定値の適用、allow_methods省略時GETのみが確定済みで、追加のCGI合意と残るConfig案は [05](05_config_agreement.md) を参照する。決定を変更するときはRequirementsと関連する全資料を同時に更新する。
 
 ## 資料構成
 
@@ -10,9 +14,9 @@
 | `00_README_overview.md`(本書) | 全体像、凡例、一次情報一覧、全トピックの担当・工数早見表、進め方 |
 | `01_http_protocol.md` | HTTP仕様(RFC 9110/9112)の理解事項: メッセージ構造、パース規則、メソッド、ステータスコード、ヘッダー、chunked、接続管理 |
 | `02_network_io.md` | ソケット・poll・ノンブロッキングI/O・タイムアウト・シグナル・エラー処理(errno禁止制約を含む) |
-| `03_config_cgi_upload.md` | 設定ファイル設計、ルーティング、静的配信/autoindex、アップロード(multipart)、CGI(RFC 3875)、Cookie(ボーナス) |
+| `03_config_cgi_upload.md` | 設定ファイル設計、ルーティング、静的配信/autoindex、アップロード、CGIの確定事項・残る論点、Cookie(必須範囲外のボーナス資料) |
 | `04_testing_and_workplan.md` | 検証方法(telnet/curl/nginx比較/負荷)と、調査→仕様→実装の進行計画、決定が必要な論点リスト |
-| [05_config_agreement.md](05_config_agreement.md) | NGINXを参考にしたConfig詳細案、設定例、今回確定したroot/alias・error_page・相対パスの扱いと残る確認事項 |
+| [05_config_agreement.md](05_config_agreement.md) | NGINXを参考にしたConfig詳細案、設定例、確定したroot/alias・error_page・相対パス・CGIの扱いと残る確認事項 |
 
 ## 凡例
 
@@ -60,21 +64,21 @@
 | N4 | ノンブロッキングI/O、部分read/write、バッファ設計 | A(主)/共 | L | L | ★★★ | 02 |
 | N5 | **errno禁止制約下のエラー処理方針** | A(主)/共 | M | M | ★★★ | 02 |
 | N6 | クライアント切断・半クローズ・shutdown・SIGPIPE | A | M | S | ★★★ | 02 |
-| N7 | タイムアウト設計(60s/CGI 10s)、時刻管理 | A | S | S | ★★ | 02 |
+| N7 | タイムアウト設計(一般60s/CGIは起動から10s・延長なし)、時刻管理 | A | S | S | ★★ | 02 |
 | N8 | シグナル(SIGINT グレースフル終了、SIGPIPE、SIGCHLD) | A | M | S | ★★ | 02 |
 | N9 | fd・メモリのリーク/上限(EMFILE、bad_alloc)、クラッシュ防止 | A(主)/共 | M | M | ★★★ | 02 |
 | N10 | 通常ファイルI/Oの扱い(pollが不要な範囲と大容量ファイルの扱い) | 共 | S | S | ★★ | 02 |
-| C1 | 設定ファイル文法設計(トークナイズ、ブロック、コメント、クォート) | B | M | L | ★★★ | 03 |
-| C2 | ディレクティブ一覧(必須/任意、型、検証規則)※未決定事項 | B(主)/共 | M | L | ★★★ | 03 |
+| C1 | 設定ファイル文法(基本文法確定・クォート等は対象外、残る細則は05) | B | M | L | ★★★ | 03 |
+| C2 | ディレクティブ一覧(必須/任意、型、検証規則)※一部確定、詳細は05 | B(主)/共 | M | L | ★★★ | 03 |
 | C3 | location 最長前方一致・root/alias 変換・パス結合 | B | M | M | ★★★ | 03 |
 | C4 | 静的ファイル配信(stat/access、ディレクトリ→index、権限エラーの対応) | B | M | M | ★★★ | 03 |
 | C5 | autoindex(opendir/readdir、HTMLエスケープ) | B | S | S | ★★ | 03 |
 | C6 | アップロード(multipart/form-data パース、保存先、サイズ制限) | B | L | L | ★★★ | 03 |
 | C7 | DELETE の挙動設計 | B | S | S | ★★ | 03 |
 | C8 | **CGIプロセス制御**(pipe/fork/dup2/execve/chdir、fd継承、waitpid、kill) | A(主)/共 | L | L | ★★★ | 03 |
-| C9 | **CGI仕様(RFC 3875)**: 環境変数、PATH_INFO、応答パース(Status/Location) | B(主)/共 | L | L | ★★★ | 03 |
-| C10 | CGIとイベントループの統合(pipe を poll、EOF=終端、un-chunk済みボディ投入) | 共 | M | M | ★★★ | 03 |
-| C11 | Cookie/セッション(ボーナス) | B | M | M | ★ | 03 |
+| C9 | **CGI仕様(RFC 3875を参考に範囲限定)**: 環境変数、PATH_INFO、応答パース(Status/Location) | B(主)/共 | L | L | ★★★ | 03 |
+| C10 | CGIとイベントループの統合(pipeをpoll、stdoutのEOFと子の終了を確認、復号済みボディ投入) | 共 | M | M | ★★★ | 03 |
+| C11 | Cookie/セッション(ボーナス資料。必須範囲外) | B | M | M | ★ | 03 |
 | T1 | テスト手法・ツール(telnet/nc/curl/ab/siege/自作スクリプト) | 共 | M | M | ★★ | 04 |
 | T2 | nginx との挙動比較手順 | 共 | S | S | ★★ | 04 |
 
@@ -93,9 +97,9 @@
 | 共通理解 | 理由 |
 |---|---|
 | ボディ長決定とバッファの責務境界(H4 ↔ N4) | AはバイトをためてBのパーサーに渡す側、Bは完成判定側。境界(「どこまで読めばリクエスト完了か」)が食い違うと結合で破綻する |
-| ステータスコードの発生箇所(H7) | 400/413/501 は Request、404/403/405 は Router、408/504 は EventLoop など複数モジュールから生じる(`Requirements.md` のmakeError一元化方針に関連) |
+| ステータスコードの発生箇所(H7) | 要求の400/413/417、ルート解決の404/403/405、CGIのpipe/fork失敗500・exec失敗/異常終了/不正出力502・時間超過504などを区別する。makeErrorでの生成は一元化し、具体的なA/B間の失敗理由の受け渡しは確定する |
 | CGI(C8–C10) | 決定事項で「共同」。起動(A)と仕様・環境変数(B)を分けて調べ、結合部(pipe の fd を誰が poll するか)で合意する |
-| エラー時の接続処理(N5/N6 ↔ H9) | エラー応答後に接続を閉じるか否かは HTTP 側の規則とソケット側の処理の両方に関わる |
+| エラー時の接続処理(N5/N6 ↔ H9) | 1接続1要求・応答後closeは確定済み。未受信ボディの読み捨て、shutdown、closeの具体的な手順は両者で揃える |
 
 ## 進め方(推奨)
 
