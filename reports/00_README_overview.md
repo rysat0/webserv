@@ -12,6 +12,7 @@
 | `02_network_io.md` | ソケット・poll・ノンブロッキングI/O・タイムアウト・シグナル・エラー処理(errno禁止制約を含む) |
 | `03_config_cgi_upload.md` | 設定ファイル設計、ルーティング、静的配信/autoindex、アップロード(multipart)、CGI(RFC 3875)、Cookie(ボーナス) |
 | `04_testing_and_workplan.md` | 検証方法(telnet/curl/nginx比較/負荷)と、調査→仕様→実装の進行計画、決定が必要な論点リスト |
+| [05_config_agreement.md](05_config_agreement.md) | NGINXを参考にしたConfig詳細案、設定例、今回確定したroot/alias・error_page・相対パスの扱いと残る確認事項 |
 
 ## 凡例
 
