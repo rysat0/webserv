@@ -11,7 +11,8 @@
 - 実行形式: `./webserv [configuration file]`
 - 設定ファイルは引数で渡されるか、デフォルトパスから読み込めること
 - 実際のWebブラウザでテスト可能であること
-- HTTP 1.0 が参考基準(強制ではない)。RFCを読むこと、telnet と NGINX で事前にテストすることが推奨されている
+- HTTP/1.0 が参考基準(強制ではない)。RFC全文の実装は要求されていない。RFCを読むこと、telnet と NGINX で事前にテストすることが推奨されている
+- チーム方針: **HTTP/1.0で応答し、HTTP/1.0・HTTP/1.1のリクエストを課題に必要な範囲で処理する**。詳細は「HTTP対応範囲」を参照
 
 ## 2. 全体ルール(違反 = 0点级)
 
@@ -107,6 +108,8 @@ access, stat, open, opendir, readdir, closedir
 - [ ] CGI は**正しいカレントディレクトリで実行**(相対パスでのファイルアクセスのため → chdir)
 - [ ] fork / execve / pipe 等は CGI 実行のためにのみ使用
 
+※ chunked リクエストの復号は課題PDFの明示要件。応答をHTTP/1.0にしても残す。チームではHTTP/1.1リクエストのchunkedを受理し、HTTP/1.0リクエストのTransfer-Encodingは不正として扱う。
+
 ## 9. 提出用 README.md 要件(英語)
 
 - [ ] 1行目(斜体): *This project has been created as part of the 42 curriculum by \<login1\>[, \<login2\>...].*
@@ -162,9 +165,9 @@ access, stat, open, opendir, readdir, closedir
 | 2 | ServerSocket | Config → listen 済み fd 群 | A |
 | 3 | EventLoop | poll 本体。イベントを各所へ配送 | A |
 | 4 | Client | 接続ごとの状態機械(受信/送信バッファ) | A |
-| 5 | HttpRequest | バイト断片 → 完成判定+構造化(chunked 対応) | B |
+| 5 | HttpRequest | HTTP/1.0・HTTP/1.1のバイト断片 → 完成判定+構造化(1.1のchunked受信に対応) | B |
 | 6 | Router | Request+Config → 静的/CGI/アップロード/エラー振り分け | B |
-| 7 | HttpResponse | ステータス+ヘッダー+ボディ → 送信バイト列 | B |
+| 7 | HttpResponse | ステータス+ヘッダー+ボディ → HTTP/1.0の送信バイト列 | B |
 | 8 | CgiHandler | fork/execve/pipe 管理、環境変数構築 | 共同 |
 | 9 | Utils | ログ、変換系の小物 | 共同 |
 
@@ -172,14 +175,16 @@ access, stat, open, opendir, readdir, closedir
 
 1. ConfigParser(B)/ 最小 Hello World サーバー(A)← 並行スタート
 2. EventLoop + Client(poll 化・複数接続)
-3. HttpRequest パーサー(GET+ヘッダーから)
+3. HttpRequest パーサー(GET+ヘッダーから。受信バージョン別のHost・Expect判定を含む)
 4. Router + HttpResponse(静的配信)← 合流ポイント
 5. エラーページ・autoindex・DELETE
-6. POST(アップロード)+ chunked
+6. POST(アップロード)+ HTTP/1.1リクエストのchunked復号
 7. CgiHandler(共同)
-8. keep-alive、タイムアウト、body size 制限、ストレステスト
+8. タイムアウト、body size 制限、ストレステスト、HTTP対応範囲の結合検証
 
 ## 決定事項(2026-08-14 確定)
+
+※ HTTP対応範囲・接続方針は2026-10-04に更新。以下の表は更新後の決定を示す。
 
 | 項目 | 決定 |
 |---|---|
@@ -193,8 +198,11 @@ access, stat, open, opendir, readdir, closedir
 | 継承 | **継承なし**。全 location に全必須項目を明示(書き忘れ=起動拒否)。「書いた物がすべて」 |
 | location マッチ | **最長前方一致**(より具体的に書いた区画が優先) |
 | タイムアウト | 一律 60 秒。CGI のみ 10 秒で kill + 504 Gateway Timeout |
-| keep-alive | 後回し。まず `Connection: close` 固定で骨格を作り、フェーズ8で余裕があれば対応 |
-| HTTPバージョン | **HTTP/1.1** を名乗る(当面 `Connection: close` を併記) |
+| 接続方針 | **1接続1要求**。`Connection: close` を付け、最終応答の全バイトを送信してから切断する |
+| keep-alive / pipelining | **今回の実装対象外**。同じ接続で次の要求を処理しない |
+| HTTP応答バージョン | **HTTP/1.0** 固定。課題要件に必要な機能を実装する |
+| HTTP受信バージョン | **HTTP/1.0・HTTP/1.1**。Host・ボディ終端・Expectの扱いは受信バージョンで判定する。RFC全文への準拠は範囲外 |
+| chunked | **HTTP/1.1リクエストの復号は実装する**。chunkedレスポンスは生成しない |
 | ステータスコード | 主要コードを網羅的に実装(基本全部) |
 | デフォルト設定パス | `./conf/default.conf`(引数なし起動時に読む) |
 | シグナル処理 | `SIGPIPE` は `SIG_IGN` で無視(send失敗時はerrnoを見ず接続close)。`SIGINT` はフラグ方式でグレースフル終了(全fd close・全メモリ解放してから終了) |
@@ -204,6 +212,60 @@ access, stat, open, opendir, readdir, closedir
 | Router構成 | 1クラス+private関数分割(`handleGet/handlePost/handleDelete/handleCgi`...) |
 | pollfd配列管理 | 毎周再構築(Client/CGI一覧から配列と監視フラグを毎回計算) |
 | 例外方針 | 起動フェーズのみ例外可・ループ内は戻り値方式。保険としてループに `catch(std::exception&)` の防波堤(ログ+接続close)。bad_alloc もここで受ける |
+
+## HTTP対応範囲(2026-10-04 更新)
+
+課題PDF Version 24.1の印刷ページ7はHTTP/1.0を参考基準として推奨し、RFC全文の実装は要求していない。一方、印刷ページ8〜11のGET / POST / DELETE、アップロード、ブラウザ互換、設定機能、CGI、chunked復号などはHTTPバージョンにかかわらず満たす。
+
+### リクエストの扱い
+
+| 項目 | HTTP/1.0リクエスト | HTTP/1.1リクエスト |
+|---|---|---|
+| 受理 | 受理する | 課題に必要な範囲で受理する |
+| Host | 省略可能 | 必須。欠落・重複・不正値は400 |
+| ボディの長さ | ボディ付き要求はContent-Lengthで区切る | Content-Length、またはTransfer-Encoding: chunkedで区切る |
+| Transfer-Encoding | 400を返して切断する | chunkedを復号する。Content-Lengthとの併記は400を返して切断する |
+| Expect: 100-continue | この期待を無視して通常の要求として処理する | Expect未対応として、ボディを待たずヘッダー完了時点で417を返して切断する |
+| その他のExpect値 | 詳細な扱いは未決定 | Expect未対応として417を返して切断する |
+
+- 構文・ボディ長の不正など、先に確定したエラーはそのステータスで応答する。上のExpect方針のために400や413を417へ置き換える必要はない。
+- Content-Lengthの不正値、桁あふれ、矛盾する重複は400。どちらの受信バージョンでも検証する。
+- TCP接続の終了をリクエストボディの正常な終端として待たない。宣言された長さやchunkedの終端まで受信できず切断された要求は未完了として扱う。
+- chunkedは終端chunk後のtrailer部分と最後の空行まで読み取り、復号後のボディにサイズ制限を適用する。trailerで既存ヘッダーを上書きしない。
+- HTTP/1.1のExpect付き要求を無視してボディ待ちにしない。417への応答後、クライアントはExpectなしの別接続で再送できる。100 Continueを送る中間応答処理は実装しない。
+- 1要求が完成した後の余剰データを次の要求として処理しない。keep-aliveやpipeliningの要求があっても、応答送信完了後に切断する。
+
+### レスポンスとCGIの扱い
+
+- ステータス行は `HTTP/1.0 <status-code> <reason-phrase>`。通常の本文付き応答は、本文のバイト数からContent-Lengthを確定し、Content-Typeとともに出力する。
+- `Connection: close` を付ける。Transfer-Encodingは出力せず、chunked形式で送信しない。
+- DELETE成功などで204を返す場合は、本文もContent-Lengthも出力しない。本文やContent-Lengthの可否はステータスに応じて判断する。
+- 405・413・417・502・504など、実装する処理に応じたステータスはHTTP/1.0応答でも使用する。HTTP/1.0への変更を理由に削除しない。
+- CGIの `SERVER_PROTOCOL` は受信した要求のバージョン(`HttpRequest::getVersion()`)を使う。応答側の固定値で上書きしない。
+- chunkedで受信したボディをCGIへ渡す場合、`CONTENT_LENGTH` は復号後のバイト数から設定する。CGIへの全ボディの書き込み後は親側stdinパイプを閉じてEOFを渡す。
+- CGI出力に長さがない場合はEOFまで受信する。既存の一括生成方針に従い、レスポンス本文の長さを確定してからHTTP/1.0応答を生成する。
+- 逐次パース、部分送受信、タイムアウト、容量制限、CGIの後始末は引き続き必要。
+
+### 結合時の確認項目
+
+- [ ] HostなしのHTTP/1.0 GET → 正常配信、HTTP/1.0応答、送信完了後に切断
+- [ ] 正常なHostを持つHTTP/1.1 GET → 正常配信、HTTP/1.0応答、送信完了後に切断
+- [ ] Hostが欠落・重複・不正なHTTP/1.1要求 → 400
+- [ ] HTTP/1.1のchunked POST → CGIが復号済みボディと正しいCONTENT_LENGTHを受け取る
+- [ ] HTTP/1.0のTransfer-Encoding付き要求、およびHTTP/1.1のContent-Length / Transfer-Encoding併記 → 400で切断
+- [ ] HTTP/1.1のExpect付きヘッダーだけを送る → ボディを待たず417。Expectなしで再送すると正常処理
+- [ ] HTTP/1.0のExpect: 100-continue付き要求にContent-Length分のボディを送る → 100や417を返さず通常処理
+- [ ] DELETE成功で204を返す場合 → 本文・Content-Lengthなし
+- [ ] クライアントがkeep-aliveを要求しても、1回の応答送信完了後に切断
+
+### 根拠
+
+- 同梱 `webserv.pdf` Version 24.1: 印刷ページ7(HTTP/1.0基準)、8〜11(必須機能・CGI)
+- [RFC 1945 §7.2.2](https://www.rfc-editor.org/rfc/rfc1945.html#section-7.2.2): HTTP/1.0のボディ長
+- [RFC 9110 §2.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-2.5): 受信・応答のバージョン
+- [RFC 9110 §10.1.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.1.1): Expectと417後の再送
+- [RFC 9112 §3.2](https://www.rfc-editor.org/rfc/rfc9112.html#section-3.2)、[§6.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1): Host、Transfer-Encoding
+- [RFC 3875 §4.1.16](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.16): CGIのSERVER_PROTOCOL
 
 ## 未決定(次に決めること)
 
@@ -240,8 +302,8 @@ access, stat, open, opendir, readdir, closedir
 
 | クラス | 責務 |
 |---|---|
-| `HttpRequest` | 逐次パース(断片投入→状態遷移→完成判定)。chunked デコード含む |
-| `HttpResponse` | レスポンス組み立て+`serialize()`+エラーページ工場 |
+| `HttpRequest` | HTTP/1.0・HTTP/1.1の逐次パース(断片投入→状態遷移→完成判定)。受信バージョン別の検証、ヘッダー段階の拒否、1.1のchunkedデコードを含む |
+| `HttpResponse` | HTTP/1.0レスポンス組み立て+`serialize()`+エラーページ工場 |
 | `Router` | Request+Config → 静的/autoindex/アップロード/DELETE/リダイレクト/CGI/エラーの振り分け |
 | `CgiExecutor` | pipe×2→fork→dup2→chdir→execve と環境変数(char**)組み立て。起動のみ担当 |
 
@@ -284,22 +346,24 @@ public:
     // Client(A側)が呼ぶ
     void   appendData(const char* data, size_t len);  // recv 断片を投入
     State  getState() const;
-    int    getErrorCode() const;      // ERROR 時: 400, 413, 501 など
+    int    getErrorCode() const;      // ERROR 時: 400, 413, 417, 501 など
     void   setMaxBodySize(size_t n);  // Config の値を注入(早期413判定)
 
     // Router(B側)が COMPLETE 後に呼ぶ
     const std::string& getMethod() const;
     const std::string& getPath() const;         // ? 以降除去済み
     const std::string& getQueryString() const;  // ? の後ろ、生のまま
-    const std::string& getVersion() const;
+    const std::string& getVersion() const;     // 受信したHTTP/1.0またはHTTP/1.1
     std::string        getHeader(const std::string& key) const;  // 大小無視
     const std::string& getBody() const;         // un-chunk 済み
 };
 ```
 
-- エラー判定(400/413/501)はパース時点で Request 自身が行う
+- エラー判定(400/413/417/501)はパース時点で Request 自身が行う
+- ヘッダー完了時に受信バージョン別のHost・Transfer-Encoding・Expectを検証する。拒否する場合はボディを待たずERRORへ遷移し、Clientがエラー応答を送る
+- ClientはappendDataのたびに状態を確認する。ERRORになった要求のボディ受信を続けてCOMPLETEを待たない
 - ヘッダーキーは内部で小文字化して格納
-- chunked デコードはこのクラスに閉じる(CGI の un-chunk 要件を自動で満たす)
+- chunked デコードはこのクラスに閉じる。HTTP/1.1要求でのみ受理し、CGIには復号済みボディを渡す
 
 ### HttpResponse
 
@@ -310,15 +374,18 @@ public:
     void setStatus(int code);   // reason phrase は内部表で自動解決
     void setHeader(const std::string& key, const std::string& value);
     void setBody(const std::string& body, const std::string& contentType);
-                                // Content-Length / Content-Type 自動設定
+                                // 通常の本文付き応答のContent-Length / Content-Typeを設定
     std::string serialize() const;
-                                // Server, Date, Connection: close 自動付与
+                                // HTTP/1.0固定。Server, Date, Connection: close自動付与
+                                // 204では本文・Content-Lengthを出力しない
     static HttpResponse makeError(int code, const ServerConfig& conf);
                                 // error_page 指定 or 内蔵デフォルトHTML
 };
 ```
 
 - `\r\n` の組み立ては serialize() に封じ込める
+- Transfer-Encodingは出力しない。本文を送れないステータスはserialize時にも検証し、setStatus/setBodyの呼び出し順にかかわらず正しい形式にする
+- 送信完了後はClientをCLOSINGへ遷移させる。次の要求を受けるための再初期化は行わない
 - エラー生成は makeError に一元化(発生箇所: Router / Request / EventLoop)
 - 注記: CGI 対応時(フェーズ7)に Router::handle の戻り値を拡張予定
 
