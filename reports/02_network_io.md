@@ -1,0 +1,118 @@
+# 02 ネットワーク・I/O — 理解すべきこと(主担当: A、一部共同)
+
+一次情報: `man 2 socket/bind/listen/accept/recv/send/poll/fcntl/shutdown/waitpid/signal`, `man 7 socket/tcp/pipe/signal`, `man 3 getaddrinfo`。
+
+課題の**0点条件がここに集中**している(クラッシュ、poll外のI/O、errno参照)。仕様を書く前に全員が理解しておくべき章。
+
+---
+
+## N1 TCP/ソケットAPI 【A, R:M, D:M, ★★★】
+
+**理解すべきこと**
+- サーバー側の流れ: `socket` → `setsockopt(SO_REUSEADDR)` → `bind` → `listen` → `accept`。各ステップの失敗時の扱い(**起動時の失敗のみ例外/終了可**、という決定事項との整合)。
+- `SO_REUSEADDR` の意味(TIME_WAIT中の再bind。付けないと再起動時に `bind` が失敗する)。
+- `listen` の backlog の意味と上限(`/proc/sys/net/core/somaxconn`)。
+- `accept` はlistenソケットが**読み取り可能**になってから呼ぶ(poll対象)。1回のPOLLINで複数接続が溜まっている可能性 → 1回だけ受けるか、ループするか(ノンブロッキングならEAGAINで止まるが**errnoは見られない**ため、設計で決める。→ N5)。
+- 許可関数に `setsockopt`, `getsockname`, `getprotobyname`, `htons` 系がある。`getsockname` は「ポート0で bind したとき実ポート取得」「接続ごとの SERVER_PORT/ローカルアドレス取得」で使える。
+- `accept` で得た接続のリモートアドレス(`REMOTE_ADDR` 用)の取得と文字列化(`inet_ntop` は許可リスト外 → 自前で変換するか `getnameinfo` 不可に注意。**許可関数リストを必ず照合**)。
+
+> 要確認: 許可関数一覧に `inet_ntoa`/`inet_ntop`/`inet_addr` は**含まれない**。`REMOTE_ADDR` の文字列化は `ntohl` で自前変換する等、制約下の方法を仕様で決める。
+
+## N2 アドレス解決・複数listen 【A, R:M, D:S, ★★★】
+
+- `getaddrinfo`/`freeaddrinfo`/`gai_strerror` の使い方(`AI_PASSIVE`、`host` 省略時 = 全インターフェース)。IPv4のみにするか(`AF_INET`固定が単純)。
+- 設定の `listen host:port` を複数持つ場合:
+  - **同一 host:port を複数 server ブロックが指定**する場合、ソケットは1つだけ作り(重複 bind は `EADDRINUSE`)、サーバーの選択は別途(`server_name`/先頭を既定)。仮想ホストはスコープ外だが「同一ポートに複数 server が書かれた場合の既定動作」は仕様化が必要。
+  - `0.0.0.0:8080` と `127.0.0.1:8080` の併記は競合する(ワイルドカードbindと特定bindの関係)→ 設定検証で弾くか。
+- **接続→どの ServerConfig か**の紐付け(accept元のlistenソケットから引く)。Client が `ServerConfig*` を保持する設計(Requirements.md の通り)の前提。
+
+## N3 poll() の厳密な意味 【A(主)/共, R:L, D:L, ★★★】
+
+**理解すべきこと**
+- `struct pollfd { fd; events; revents; }`。`events` は監視したい条件(POLLIN/POLLOUT)、`revents` は結果。**POLLHUP/POLLERR/POLLNVAL は events に指定しなくても revents に出る**。
+- 各イベントの意味:
+  - `POLLIN`: 読める(データあり、またはEOF、またはlistenソケットでaccept可能)。EOF(recvが0)は POLLIN で通知される。
+  - `POLLOUT`: 書ける(送信バッファに空きがある)。**書くデータがないときにPOLLOUTを監視し続けると busy loop になる** → 送信バッファが空でない時だけ監視する(決定事項「毎周再構築」の設計に直結)。
+  - `POLLHUP`: 相手が閉じた(ソケットでは相手のclose/RST、パイプでは書き込み側がclose)。**パイプでは POLLHUP と POLLIN が同時に立ち、未読データがまだ残る**ことがある → CGI出力は、POLLHUPでも read して 0 が返るまで読み切る。
+  - `POLLERR`, `POLLNVAL`(無効fd)の扱い。
+- `poll` のタイムアウト引数(ms)と、**タイムアウト見回り**のための上限設定(最短期限までの時間 or 固定1秒など)。
+- `poll` 自体のエラー(`-1`)と **EINTR**(シグナル割り込み)。**errno禁止制約**との関係(→ N5)。SIGINTでのグレースフル終了フラグ確認のためにも、`-1` が返ったらフラグを見てループを継続/終了する。
+- 通常ファイルfdは poll で常に「準備完了」が返る(意味がない)→ N10。
+- 同等関数(select/epoll)との比較。本チームは poll に決定済み。評価で**poll を選んだ理由とfd数上限の違い**(select は FD_SETSIZE=1024)を説明できる準備。
+
+**資料化する内容**: 「fdの種類(listen/client/CGI stdin/CGI stdout)× 状態 × 監視するイベント」の対応表。毎周の再構築ロジックの仕様の根拠になる。
+
+## N4 ノンブロッキングI/Oとバッファ 【A(主)/共, R:L, D:L, ★★★】
+
+**理解すべきこと**
+- `fcntl(fd, F_SETFL, O_NONBLOCK)`(Linux)。ソケットとCGI用パイプの両方に設定する。`accept` で得たソケットは**継承されない**ので個別に設定が必要(要確認: Linuxの挙動)。
+- **部分read/部分write**: `recv` は要求バイト数より少なく返りうる。`send` も**全部は送れない**ことがある → 送信バッファの先頭からのオフセット管理と、POLLOUT での継続送信。
+- `recv` の戻り値: `>0` データ、`0` 相手のclose(EOF)、`-1` エラー or 「今は読めない」。
+- 読み取りサイズ(固定バッファ4096/8192 等)と、1回のイベントで**何回readするか**(1回/周に絞ると公平性が上がる、ループはEAGAINが見られない制約で危険)。
+- 巨大なレスポンス(大きなファイル)をメモリにどう持つか(全読み込み vs 逐次)。決定事項は `serialize()` で一括生成 → メモリ使用量とのトレードオフ(`client_max_body_size` と配信ファイルサイズ上限)を仕様で明記。
+- 受信バッファの上限(ヘッダー部の上限、`bad_alloc` 防止)。
+
+## N5 errno禁止制約下のエラー処理方針 【A(主)/共, R:M, D:M, ★★★】
+
+課題要件: **read/write(recv/send)後に errno を見て挙動を変えてはならない**。違反は0点扱い。
+
+**理解すべきこと**
+- 従来のノンブロッキングI/Oでは `-1` かつ `EAGAIN/EWOULDBLOCK` を「待てばよい」、`EINTR` を「リトライ」、それ以外を「致命エラー」と区別する。**これを errno で区別できない**。
+- 方針の典型案(**仕様として決めて文書化**する):
+  - poll が「読める」と言ったfdに対する recv が `-1` → **エラーとみなして接続を閉じる**(poll後の1回のrecvなので EAGAIN は本来起きにくい前提)。`0` → EOF として閉じる。
+  - 同様に send が `-1` → 接続close。
+  - 「1イベントにつき read/write を**1回だけ**」に統一する(ループしないことで EAGAIN を発生させない)。
+- `accept` / `poll` / `fork` / `execve` 等、**read/write 以外の呼び出しの errno 参照が許されるか**は課題の文面で確認(禁止は read/write 後の errno に限定されている)。ただし評価者の解釈リスクがあるため**全般に errno 分岐は避ける**方針が安全。ログ用に `strerror(errno)` を出す程度は問題ないか、評価基準(別資料)で確認する。
+- `EMFILE`(fd枯渇)時の `accept` 失敗 → listen fd が常にPOLLINのままになるbusy loop化(対策: 接続数上限、失敗時のログ抑制)。
+
+> 重要な論点(未決): 「poll→1回read」で本当に取りこぼし/ハングが起きないか(特にエッジケース)を、仕様段階で表にして検証する。
+
+## N6 クライアント切断・SIGPIPE・shutdown 【A, R:M, D:S, ★★★】
+
+- 切断の種類: 正常close(recvが0)、リセット(RST、recv/sendが-1)、半クローズ(クライアントが書き込み側だけ閉じてレスポンスを待つ)。HTTPサーバーとしては「リクエスト受信完了前のEOF → 破棄」「受信完了後のEOF → レスポンスは送る/捨てる」の方針を決める。
+- **SIGPIPE**: 閉じた相手にsendするとデフォルトでプロセスが死ぬ → 決定事項どおり `SIG_IGN`。`send(..., MSG_NOSIGNAL)` の併用も可(要確認: フラグ使用が許可されるか。signal 無視で足りるので不要)。
+- `close` と `shutdown(SHUT_WR)` の違い。**レスポンス送信後にcloseする際、未送信データ/未読受信データがあるとRSTが飛び、クライアントが応答を取りこぼす**問題(特に413等の早期エラー応答で、受信が残っている場合)。これを避ける手順(`shutdown(SHUT_WR)` 後に読み捨て、など)を調べる。
+- 切断されたClientに紐づく **CGIプロセスの後始末**(kill・waitpid・パイプclose)。リーク防止のため仕様に明記。
+
+## N7 タイムアウト設計 【A, R:S, D:S, ★★】
+
+- 決定事項: 一律60秒、CGIのみ10秒でkill+504。
+- 理解/決定すべきこと: **何を起点に60秒か**(最終アクティビティ時刻。リクエスト受信中/アイドル/レスポンス送信中で分けるか)、時計の選択(`time(NULL)` は許可関数外のため確認が必要。許可リストに `time/gettimeofday/clock_gettime` が**見当たらない** → **要確認**。Logger の `[日時]` 出力と合わせて使用可否を課題/評価基準で確認)。
+- タイムアウト検出時の応答(408を返せるなら返して close、送れない状態なら黙ってclose)。
+- slowloris(1バイトずつ送り続ける)への耐性: アクティビティ更新条件を「データ到着」か「リクエスト完了進捗」かで変える議論。
+
+> **確認事項**: 許可外の関数(`time`, `strftime`, `localtime`, `gettimeofday` 等)を使えるかを明確にする。Requirements.md の許可関数リストには時刻関数がないが、HTTPの `Date` ヘッダーとログ時刻、タイムアウトに時刻が必須。評価基準・教員/運営への確認が必要。これは**実装前に必ず解決すべき論点**。
+
+## N8 シグナル 【A, R:M, D:S, ★★】
+
+- `signal()` のみ許可(`sigaction` は許可外)。ハンドラ内で安全にできること(**`volatile sig_atomic_t` フラグ設定のみ**)。
+- SIGINT: フラグ方式のグレースフル終了(決定済み)。pollがEINTRで返る → フラグ確認 → cleanup。
+- SIGPIPE: 無視(決定済み)。
+- SIGCHLD: CGI終了の検知を `waitpid(pid, &st, WNOHANG)` の定期ポーリングにするか、SIGCHLD を使うか。ゾンビプロセス防止。
+- 子プロセス(CGI)側でのシグナルのデフォルト復元(`SIG_IGN` は execve を越えて継承される!→ 子で SIGPIPE を `SIG_DFL` に戻す必要の有無を確認)。
+
+## N9 リソース管理・クラッシュ防止 【A(主)/共, R:M, D:M, ★★★】
+
+- 「どんな状況でもクラッシュ禁止」(メモリ不足含む)への設計: 
+  - 例外方針(決定済み): ループ内は戻り値方式 + `catch(std::exception&)` の防波堤、`bad_alloc` もここで受ける。
+  - `std::string`/`vector` の無制限成長の防止(ヘッダー/ボディ/CGI出力に上限)。
+  - ゼロ除算、範囲外アクセス、NULL参照、`std::string::substr` の例外(`out_of_range`)など、C++98特有のクラッシュ要因の洗い出し。
+- fd管理: 上限(`ulimit -n`)、`EMFILE` 対策、CGI用pipe/子プロセス側での不要fdクローズ(`FD_CLOEXEC` は `fcntl` で許可される範囲か確認)。
+- 長時間稼働でのメモリ/fdリーク検証方法(`valgrind`, `lsof`, `/proc/PID/fd`)→ 04。
+
+## N10 通常ファイルI/O 【共, R:S, D:S, ★★】
+
+- 課題: **通常のディスクファイルは poll 不要**で read/write 可。ただし read が長時間ブロックする大きなファイル/遅いFSでサーバー全体が止まる点は設計上の注意(「サーバーは常にノンブロッキング」要件との整合を評価者にどう説明するか)。
+- 静的ファイルを一括読み込みするか、分割して送るか。上限サイズ。
+- ※pipe/FIFO/ソケットは対象外(必ず poll 経由)。CGIのstdin/stdout用pipeがこれに該当する点を混同しない。
+
+---
+
+## この章の作業量サマリ
+
+| 区分 | 量 | コメント |
+|---|---|---|
+| N1–N2 | M | man を読めば足りる。短時間で資料化可 |
+| N3–N5 | XL | 仕様化で最も判断が多い。**errno制約の下での設計**はAの最重要資料 |
+| N6–N9 | M〜L | 小項目が多い。表にまとめやすい |
+| 要確認事項(許可関数/時刻) | S | ただし**回答が遅れると他の設計に影響**するので最優先で確認 |
