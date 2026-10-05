@@ -27,3 +27,8 @@ https://www.coins.tsukuba.ac.jp/~syspro/2022/2022-07-27/cgi-python.html
 
 全体参考
 https://qiita.com/ryhara/items/c46fe320332b237b5c0d
+
+レビュー参考
+https://www.42evalhub.com/common/webserv
+https://github.com/JUNNETWORKS/42-webserv/blob/main/docs/review.md#レビュー
+

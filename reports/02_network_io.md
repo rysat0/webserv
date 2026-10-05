@@ -23,6 +23,8 @@
 - 許可関数に `setsockopt`, `getsockname`, `getprotobyname`, `htons` 系がある。`getsockname` は「ポート0で bind したとき実ポート取得」「接続ごとの SERVER_PORT/ローカルアドレス取得」で使える。
 - **確定(C-28)**: tasugiyaはacceptした接続に対するgetsocknameでサーバー側IP・ポートを取得し、rysatoのHTTP/Router側へ渡す。HTTP/1.0でHostがない場合の末尾/補完301に使う。listenの0.0.0.0やacceptで得たクライアント側アドレスを代用しない。有効なHostがある場合はその明示ポートごとURLに使い、Hostにポートがなければ接続のポートを自動追加しない。接続情報のAPI・保持方法と取得失敗時の扱いは別途確定する。
 - **確定(C-30)**: Hostの受付検証はrysatoがHTTP層で行う。Host値のためのDNS問い合わせはせず、接続先やServerConfigも切り替えない。Hostの名前/任意ポートの受付規則は01・05のC-30を参照する。
+- **確定(CGI-37)**: HTTP/1.0でHostがないCGI要求のSERVER_NAMEには、C-28と同じ接続のサーバー側IPをgetsocknameで取得して使う。listenの0.0.0.0や接続元IPで代用しない。接続情報のAPI・保持方法と取得失敗時の扱いは引き続き別途確定する。
+- **確定(CGI-36)**: REMOTE_ADDRにはacceptで取得した接続元のIPv4アドレスをドット区切りの10進数で必ず設定する。ポート番号は含めず、逆引きDNSやX-Forwarded-For等による上書きを行わない。文字列化手段と受け渡しAPIは引き続き別途確定する。
 - `accept` で得た接続のリモートアドレス(`REMOTE_ADDR` 用)の取得と文字列化(`inet_ntop` は許可リスト外 → 自前で変換するか `getnameinfo` 不可に注意。**許可関数リストを必ず照合**)。
 
 > 要確認: 許可関数一覧に `inet_ntoa`/`inet_ntop`/`inet_addr` は**含まれない**。`REMOTE_ADDR` の文字列化は `ntohl` で自前変換する等、制約下の方法を仕様で決める。
@@ -81,7 +83,7 @@
   - poll が「読める」と言ったfdに対する recv が `-1` → **エラーとみなして接続を閉じる**(poll後の1回のrecvなので EAGAIN は本来起きにくい前提)。`0` → EOF として閉じる。
   - 同様に send が `-1` → 接続close。
   - 「1イベントにつき read/write を**1回だけ**」に統一する(ループしないことで EAGAIN を発生させない)。
-- `accept` / `poll` / `fork` / `execve` 等、**read/write 以外の呼び出しの errno 参照が許されるか**は課題の文面で確認(禁止は read/write 後の errno に限定されている)。ただし評価者の解釈リスクがあるため**全般に errno 分岐は避ける**方針が安全。ログ用に `strerror(errno)` を出す程度は問題ないか、評価基準(別資料)で確認する。
+- 課題PDFのerrno禁止はread/write後の挙動変更について記されている。CGIのstat/access失敗は、失敗直後のerrnoをCGI-90の404/403/414/500の分類に使う。read/write(recv/send)のエラー処理にはこの分類を適用しない。accept/poll等の具体的な分岐方法は別途確定する。
 - `EMFILE`(fd枯渇)時の `accept` 失敗 → listen fd が常にPOLLINのままになるbusy loop化(対策: 接続数上限、失敗時のログ抑制)。
 
 > 重要な論点(未決): 「poll→1回read」で本当に取りこぼし/ハングが起きないか(特にエッジケース)を、仕様段階で表にして検証する。
@@ -91,7 +93,7 @@
 - 切断の種類: 正常close(recvが0)、リセット(RST、recv/sendが-1)、半クローズ(クライアントが書き込み側だけ閉じてレスポンスを待つ)。HTTPサーバーとしては「リクエスト受信完了前のEOF → 破棄」「受信完了後のEOF → レスポンスは送る/捨てる」の方針を決める。
 - **SIGPIPE**: 閉じた相手にsendするとデフォルトでプロセスが死ぬ → 決定事項どおり `SIG_IGN`。`send(..., MSG_NOSIGNAL)` の併用も可(要確認: フラグ使用が許可されるか。signal 無視で足りるので不要)。
 - `close` と `shutdown(SHUT_WR)` の違い。**レスポンス送信後にcloseする際、未送信データ/未読受信データがあるとRSTが飛び、クライアントが応答を取りこぼす**問題(特に413等の早期エラー応答で、受信が残っている場合)。これを避ける手順(`shutdown(SHUT_WR)` 後に読み捨て、など)を調べる。
-- 切断されたClientに紐づく **CGIプロセスの後始末**(kill・waitpid・パイプclose)。リーク防止のため仕様に明記。
+- CGI待機中の切断・半閉鎖・追加受信とCGI後始末はCGI-107〜118で確定済み。完成済み要求の受信EOFだけでCGIを止めず、接続が使えないと検出した時に関連付けを外して停止・回収する。
 
 ## N7 タイムアウト設計 【tasugiya, R:S, D:S, ★★】
 
@@ -100,15 +102,15 @@
 - 一般の受信タイムアウト検出時の応答(408を返せるなら返してclose、送れない状態ならclose)は具体化が必要。CGIタイムアウトの応答は504と確定済みで、打ち切り後に子が異常終了しても502へ上書きしない。
 - slowloris(1バイトずつ送り続ける)への耐性: アクティビティ更新条件を「データ到着」か「リクエスト完了進捗」かで変える議論。
 
-> **確認事項**: 許可外の関数(`time`, `strftime`, `localtime`, `gettimeofday` 等)を使えるかを明確にする。Requirements.md の許可関数リストには時刻関数がないが、HTTPの `Date` ヘッダーとログ時刻、タイムアウトに時刻が必須。評価基準・教員/運営への確認が必要。これは**実装前に必ず解決すべき論点**。
+> **確認事項**: 許可外の関数(`time`, `strftime`, `localtime`, `gettimeofday` 等)を使えるかを明確にする。Requirements.md の許可関数リストには時刻関数がないが、HTTPの `Date` ヘッダーとログ時刻、タイムアウトに時刻が必須。評価基準・教員/運営への確認が必要。これは**実装前に必ず解決すべき論点**。CGIについて_exitとclock_gettimeはユーザー確認により使用不可(CGI-119)。CGI経過時間には03の9/10の/proc/uptimeによる代替案を現時点で採用している(CGI-120〜127)。利用可否・失敗時の処理・実負荷での精度と負荷を検証し、実際の動作で見直し得る。通常接続の計時・Date/ログの暦日時は別途扱う。
 
 ## N8 シグナル 【tasugiya, R:M, D:S, ★★】
 
 - `signal()` のみ許可(`sigaction` は許可外)。ハンドラ内で安全にできること(**`volatile sig_atomic_t` フラグ設定のみ**)。
 - SIGINT: フラグ方式のグレースフル終了(決定済み)。pollがEINTRで返る → フラグ確認 → cleanup。
 - SIGPIPE: 無視(決定済み)。
-- SIGCHLD: CGI終了の検知を `waitpid(pid, &st, WNOHANG)` の定期ポーリングにするか、SIGCHLD を使うか。ゾンビプロセス防止。
-- 子プロセス(CGI)側でのシグナルのデフォルト復元(`SIG_IGN` は execve を越えて継承される!→ 子で SIGPIPE を `SIG_DFL` に戻す必要の有無を確認)。
+- SIGCHLD: ハンドラー・SIG_IGNによる自動回収を追加せず、EventLoopがwaitpid(pid, &st, WNOHANG)で回収する(CGI-109・110)。実行中/回収待ちはpoll待ち時間を最大100 msとする(CGI-111)。
+- 子はexecve前にSIGPIPEをSIG_DFLへ戻す(CGI-117確定)。親のSIGPIPE無視は維持し、SIGCHLDをSIG_IGNにしない。
 
 ## N9 リソース管理・クラッシュ防止 【tasugiya(主)/共, R:M, D:M, ★★★】
 
@@ -116,9 +118,10 @@
   - 例外方針(決定済み): ループ内は戻り値方式 + `catch(std::exception&)` の防波堤、`bad_alloc` もここで受ける。
   - `std::string`/`vector` の無制限成長の防止(ヘッダー/ボディ/CGI出力に上限)。
   - ゼロ除算、範囲外アクセス、NULL参照、`std::string::substr` の例外(`out_of_range`)など、C++98特有のクラッシュ要因の洗い出し。
-- fd管理: 上限(`ulimit -n`)、`EMFILE` 対策、CGI用pipe/子プロセス側での不要fdクローズ(`FD_CLOEXEC` は `fcntl` で許可される範囲か確認)。
+- fd管理: 上限(`ulimit -n`)、`EMFILE` 対策、CGIへのfd継承はCGI-116で確定済み。Linuxではlisten/acceptソケットと全CGIパイプにF_SETFD/FD_CLOEXECを設定する。
 - **CGI同時実行数にアプリケーション独自の上限は設けない**。件数を理由に503を返す分岐や待ち行列も設けない。これはCGI 1件ごとの出力サイズ上限・10秒の時間制限を撤廃する意味ではない。一般のクライアント接続数上限は別途未決定。
-- CGIの起動・実行失敗は原因を区別する。スクリプトなし404、読み取り不可403、サーバー側のpipe/fork失敗500、exec失敗・子の異常終了・不正出力502。OS資源不足でpipe/forkが失敗した場合も500とし、途中まで作ったfd等を回収する。失敗理由をtasugiyaとrysatoの間で受け渡すAPIは未確定。
+- CGIの起動・実行失敗は原因を区別する。スクリプトなし404、読み取り不可403、サーバー側のpipe/fork失敗500、exec失敗・子の異常終了・不正出力502。OS資源不足でpipe/forkが失敗した場合も500とし、途中まで作ったfd等を回収する。受け渡し型・APIはCGI-91〜98で確定済み。後始末はCGI-107〜118に従い、エラー対応・適用境界はCGI-128〜134で確定済み。CgiResult失敗時は部分stdoutを使わずmakeError、成功時はparseCgiOutput後にapplyErrorPageへ進む。正常なCGIの400〜599もConfig C-20の本文置換対象とし、最初の失敗コードを保持する。
+- CGIの子の起動失敗時はCGI-123の子専用解放経路を使う。mainでcleanupInChildを呼び、複製された管理対象fd・所有メモリとEventLoop本体を解放してreturn 127する。子ではkill/waitpid/shutdownを実行しない。親の停止・回収は明示的なcleanupに置き、デストラクターはfd・メモリ解放だけとする。起動中のCgiProcessもfork前からEventLoopの所有管理へ登録し、一時fdはstartの子側失敗分岐で解放する。親は既存のwaitpidで502を検出・回収する。
 - 長時間稼働でのメモリ/fdリーク検証方法(`valgrind`, `lsof`, `/proc/PID/fd`)→ 04。
 
 ## N10 通常ファイルI/O 【共, R:S, D:S, ★★】
