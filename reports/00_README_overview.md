@@ -3,9 +3,9 @@
 > 対象: webserv(C++98 HTTPサーバー)。`Requirements.md` の要件とチーム決定(担当tasugiya=ネットワーク/イベントループ、rysato=HTTP層/設定、CGIは共同)を前提に、
 > **実装に入る前の「調査 → 仕様作成」フェーズ**で必要な理解事項と作業量を整理したもの。確定事項と、これから合意する仕様・設計案を分けて扱う。
 
-実装する範囲は [Requirements.md](../Requirements.md) を基準にする。HTTP/1.0で応答し、HTTP/1.0と必要なHTTP/1.1要求を受理する。1接続1要求・`Connection: close` とし、keep-aliveとパイプライン処理は対象外。HTTP/1.1のchunked入力の復号は実装する。
+実装する範囲は [Requirements.md](../Requirements.md) を基準にする。HTTP/1.0で応答し、HTTP/1.0と必要なHTTP/1.1要求を受理する。1接続1要求・`Connection: close` とし、keep-aliveとパイプライン処理は対象外。HTTP/1.1のchunked入力の復号は実装する。 HTTP要求行・ヘッダーはCRLF限定で、単独LF・不正な単独CRは400。TCPで分割されたCRLFは続きを待つ(C-31)。 要求行はCRLF込み8 KiB、ヘッダー合計は終端空行込み32 KiBのコード内定数とし、超過は414/431(C-32)。ボディはヘッダー合計に含めない。 HTTP要求ヘッダーの折り返しとコロン直前の空白は400、値の前後SP/HTABだけを除去する(C-33)。 ヘッダー名はtokenを検証してASCII小文字で保持し、空・不正文字・コロンなしは400とする(C-34)。 要求のContent-Lengthは最大1行とし、同値の重複・カンマ入りも400とする(C-35)。 CL/TEが両方ない要求はPOSTも空ボディとし、省略だけで411にしない(C-36)。
 
-必須部分のCGIはPythonのみ。RFC 3875を参考に対応範囲を限定し、確定事項と残る論点は [03のC12](03_config_cgi_upload.md) に整理する。Configはroot/aliasの区別、error_pageのファイル直接指定、設定ファイル基準の相対パス、限定文法5点、省略時のNGINX既定値の適用、allow_methods省略時GETのみが確定済みで、追加のCGI合意と残るConfig案は [05](05_config_agreement.md) を参照する。決定を変更するときはRequirementsと関連する全資料を同時に更新する。
+必須部分のCGIはPythonのみ。RFC 3875を参考に対応範囲を限定し、確定事項と残る論点は [03のC12](03_config_cgi_upload.md) に整理する。Configはroot/aliasの区別、error_pageのファイル直接指定、設定ファイル基準の相対パス、限定文法5点、省略時の原則NGINX既定値の適用(listenのみC-39)、allow_methods省略時GETのみ、upload_store / cgi_extension省略時無効、同じlocationでroot/aliasを併記した場合の起動エラー、aliasのディレクトリ限定・prefixと値の末尾 `/` 必須、明示listenのIPv4:port限定・1serverに最大1回、listenの重複・競合拒否、Hostによる仮想ホスト選択の対象外化、ボディ上限の正の十進整数・バイト単位限定、設定項目の指定回数と重複拒否、indexの単一ファイル名指定と未発見時の動作、autoindexの小文字on/off・HTML固定、allow_methodsの許可値と検証規則、upload_storeの書式と既存ディレクトリ指定、cgi_extensionの書式・拡張子文法・1組限定、error_pageの100〜599受付・400〜599への適用と引数書式、returnの301/302＋固定HTTP(S)絶対URL指定、リダイレクト専用locationの配信設定併記禁止・配信既定値補完の省略・許可メソッド確認の優先、locationの文字列による最長前方一致(`/a`は`/abc`にも一致)、query分離後のパスの1回デコードとlocation選択までの処理順序、`.`・`..`・連続スラッシュの正規化と先頭より上への移動の400拒否、symlinkを置かない運用前提と検出・拒否機能の省略、実ディレクトリへのGETに対する末尾/補完301とquery保持、自動補完URLのHost優先・Host欠落時の接続情報使用、自動補完パスの再エンコードとqueryの表記保持、HostのIPv4/ASCIIホスト名＋任意ポートへの受付限定が確定済みで、Configの合意内容とCGI関連の設定は [05](05_config_agreement.md) を参照する。文法の細則と空locationの受理はC-37、location設定値はC-38、listen省略値はC-39、起動時ファイル検証はC-40、設定の組み合わせはC-41、型/APIはC-42で確定し、Configの6項目は合意完了(実装・検証は別)。決定を変更するときはRequirementsと関連する全資料を同時に更新する。
 
 ## 資料構成
 
@@ -16,7 +16,7 @@
 | `02_network_io.md` | ソケット・poll・ノンブロッキングI/O・タイムアウト・シグナル・エラー処理(errno禁止制約を含む) |
 | `03_config_cgi_upload.md` | 設定ファイル設計、ルーティング、静的配信/autoindex、アップロード、CGIの確定事項・残る論点、Cookie(必須範囲外のボーナス資料) |
 | `04_testing_and_workplan.md` | 検証方法(telnet/curl/nginx比較/負荷)と、調査→仕様→実装の進行計画、決定が必要な論点リスト |
-| [05_config_agreement.md](05_config_agreement.md) | NGINXを参考にしたConfig詳細案、設定例、確定したroot/alias・error_page・相対パス・CGIの扱いと残る確認事項 |
+| [05_config_agreement.md](05_config_agreement.md) | NGINXを参考にしたConfigの合意事項・設定例・型とAPI。6項目合意済み。HTTP/CGI等の処理側の残件は別資料を参照 |
 
 ## 凡例
 
@@ -47,7 +47,7 @@
 
 | ID | トピック | 担当 | R | D | 優先度 | 詳細 |
 |---|---|---|---|---|---|---|
-| H1 | HTTPメッセージの構造(start-line/headers/body、CRLF、改行寛容) | rysato(主)/共 | M | M | ★★★ | 01 |
+| H1 | HTTPメッセージの構造(start-line/headers/body、CRLF限定・断片受信) | rysato(主)/共 | M | M | ★★★ | 01 |
 | H2 | リクエスト行・URI・パーセントデコード・パス正規化 | rysato | M | M | ★★★ | 01 |
 | H3 | ヘッダー規則(大小無視、OWS、重複、必須Host) | rysato | M | S | ★★★ | 01 |
 | H4 | ボディ長の決定(Content-Length / chunked / 両方指定の扱い) | rysato(主)/tasugiya | L | M | ★★★ | 01 |
@@ -68,7 +68,7 @@
 | N8 | シグナル(SIGINT グレースフル終了、SIGPIPE、SIGCHLD) | tasugiya | M | S | ★★ | 02 |
 | N9 | fd・メモリのリーク/上限(EMFILE、bad_alloc)、クラッシュ防止 | tasugiya(主)/共 | M | M | ★★★ | 02 |
 | N10 | 通常ファイルI/Oの扱い(pollが不要な範囲と大容量ファイルの扱い) | 共 | S | S | ★★ | 02 |
-| C1 | 設定ファイル文法(基本文法確定・クォート等は対象外、残る細則は05) | rysato | M | L | ★★★ | 03 |
+| C1 | 設定ファイル文法(基本文法確定・クォート等は対象外、Configの型/APIも確定・詳細は05) | rysato | M | L | ★★★ | 03 |
 | C2 | ディレクティブ一覧(必須/任意、型、検証規則)※一部確定、詳細は05 | rysato(主)/共 | M | L | ★★★ | 03 |
 | C3 | location 最長前方一致・root/alias 変換・パス結合 | rysato | M | M | ★★★ | 03 |
 | C4 | 静的ファイル配信(stat/access、ディレクトリ→index、権限エラーの対応) | rysato | M | M | ★★★ | 03 |
