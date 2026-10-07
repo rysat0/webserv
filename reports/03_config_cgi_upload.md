@@ -2,120 +2,97 @@
 
 一次情報: nginx ドキュメント(`ngx_http_core_module` の server/location/root/index/autoindex/error_page/client_max_body_size/limit_except/return)、RFC 3875(CGI)、RFC 7578(multipart/form-data)、RFC 3986、RFC 6265(ボーナス)。
 
-CGIの確定事項は [Requirements.md](../Requirements.md) と末尾の「C12 CGIの最小構成・決定事項と残る合意」に揃えて記録する。C8〜C10には調査項目も含まれ、列挙された機能すべてを実装するという意味ではない。
+CGIの決定表の正本は [Requirements](../Requirements.md#cgi-decisions)。本書のHTTP/1.1要求規則はHTTP-04に従いHTTP/1.2〜1.9にも適用し、SERVER_PROTOCOLには受信表記を保持する。規則の説明・共有API・起動と計時の採用案は本書の [C12](#cgi-details) にまとめる。C8〜C10には調査項目も含まれ、列挙された機能すべてを実装するという意味ではない。
 
 ---
 
 ## C1 設定ファイル文法 【rysato, R:M, D:L, ★★★】
 
-**理解すべきこと**
-- 本チームの基本文法は確定済み(05のC-04)。ファイル直下のserverとその中のlocation、`directive arg1 arg2;`、`{}`、`#`コメント、空白・タブ・改行区切りを使う。引用符・エスケープ・変数・include・正規表現・locationの入れ子・reload・http/eventsの外枠は省く。
-- **確定(C-37)**: serverを1個以上、各serverにlocationを1個以上必須とする。ブロック後の`;`は拒否し、server/locationを含む設定名は大小区別、同じ階層内の記述順は不問。特殊location(= / ^~ / ~ / ~* / 名前付き)とif/rewrite/try_filesは起動エラー。空locationは既定値で文法上受理する。実在・権限の起動時検証とは区別する。
-- 字句解析(トークン種別: WORD, `{`, `}`, `;`)と構文解析の分離(決定: 1クラス、private関数で分離)。
-- **確定(C-42)**: ConfigParser::parse(const std::string&)が既定値補完・パス解決・検証済みのConfigを値で返す。設定読込/解析/検証エラーはstd::runtime_errorでmainへ伝え、mainが理由を表示して起動を中止する。型はstring/int/size_t/vector/set/mapとenum、CGI設定は文字列2つの1組。getterのみ公開し、mainのconst Configをtasugiyaがconst参照/ポインタで使う。Configは参照元より長く生存させる。
-- 文法エラー・未対応の書き方は理由を表示して起動を中止する(行番号なし、確定済み)。未閉じブロックや未知設定を補正・無視しない。各ディレクティブの必須性・回数・引数数・数値範囲等は05の確定事項に従う。
-- client_max_body_sizeは正の十進整数・バイト単位のみ、単位接尾辞と桁あふれは拒否(C-13で確定)。保持型はstd::size_tで確定(C-42)。
-- 設定ファイルのデフォルトパス `./conf/default.conf`(決定)、引数>1個や読めないファイルのエラー。
-
-**資料化する内容**: 文法のBNF風定義、エラー種別一覧、**サンプル設定ファイル(評価デモ用に複数必要)**の設計方針。
+文法・既定値・起動エラーは合意済み(C-04〜07・37)。限定したserver/location構文を使い、NGINX全体との互換性・継承は持たせない。文法と設定例は [05](05_config_agreement.md#config-decisions) を参照する。
 
 ## C2 ディレクティブ一覧と検証規則 【rysato(主)/共, R:M, D:L, ★★★】
 
-課題§7の10項目をディレクティブに落とす。決定事項は「継承なし・省略時は原則NGINXの既定値を適用(listenのみC-39の固定値)」「NGINX風+独自名の混在」、root/aliasの区別、error_pageの直接ファイル指定、相対パスの設定ファイル基準。明示offを強制しない。独自項目の省略値はallow_methodsがGETのみ、upload_store / cgi_extensionが無効で確定済み。Configの型/APIはC-42で確定し、[Config合意資料](05_config_agreement.md)に揃える。
-
-**表に起こす内容(各行: 名前 / 階層 / 型 / 必須か / 検証 / nginx対応名)**
-
-| 課題要件 | 階層 | 叩き台名 | 備考 |
-|---|---|---|---|
-| listen interface:port | server | `listen` | 明示時はIPv4:portのみ(確定、C-10)。IPv4の各数値は0〜255、ポートは1〜65535。他の書式・追加オプション・不正値は起動エラー。省略時は起動権限によらず0.0.0.0:8000(C-39)。明示は1serverに最大1回とし、同じ値でも2回以上は起動エラー(確定、C-11)。複数ポートはserverを分ける。同一IPv4:portと同じポートでの0.0.0.0/特定IPの競合は既定値補完後に検証し起動エラー(確定、C-12)。権限判定は行わず、bind失敗は起動エラー。別ポートへの自動変更なし(C-39) |
-| デフォルトエラーページ | server | `error_page` | ファイルを直接指定し、未指定・読み取り失敗時は内蔵ページ(確定)。複数指定可・同じserver内の同一コード重複は起動エラー(確定、C-14)。server内に100〜599の3桁コード1個＋ファイルパス1個(C-20)。複数コード・ステータス変更・不正値/引数数は起動エラー。HTTPの本文禁止規則を優先する。本文差し替えは400〜599のみ。100〜399の設定は受理するが応答に適用しない(確定、C-20追記) |
-| ボディ最大サイズ | server | `client_max_body_size` | 省略時1 MiB。明示値は正の十進整数・バイト単位のみ(確定、C-13)。0・符号・小数・単位接尾辞・桁あふれは起動エラー。復号後のボディ全体に適用し、上限と同じサイズは受理、超過は413。明示は1serverに最大1回(確定、C-14)。保持型はstd::size_t(C-42)、詳細は05を参照 |
-| 許可メソッド | location | `allow_methods` | 省略時GETのみ許可(確定)。POST・DELETEは必要なlocationで明示する。CGI用locationのGET/POST限定・DELETEへの405は維持。明示は1locationに最大1回(確定、C-14)。大文字GET/POST/DELETEを空白区切りで重複なく1個以上指定し、空・重複・小文字・カンマ区切り・その他の値は起動エラー(確定、C-17)。順序に意味はなく、GET等を自動追加しない |
-| リダイレクト | location | `return`(確定、C-21) | location内に301/302＋ホスト部分を持つ固定HTTP(S)絶対URLの2引数。相対URL・他コード・不正な値/引数数は起動エラー。変数・元URI/queryの自動追加・本文指定は省く(H11) |
-| ルート対応付け | location | `root` / `alias` | rootはURI全体を追加、aliasはprefix置換(確定)。両方省略時はroot=`html`を設定ファイル基準で解決。alias明示時はrootを補完しない。同じlocationへの併記は設定エラーで起動中止(確定、C-08)。aliasはディレクトリ対応に限定し、prefixと値の末尾 `/` がなければ補完せず起動エラー(確定、C-09) |
-| autoindex | location | `autoindex on/off` | 小文字on/offの1引数のみ、省略時off、HTML固定(確定、C-16)。不正値・引数数は起動エラー。形式・サイズ表記・時刻表示等の追加Configは作らない |
-| デフォルトファイル | location | `index` | 省略時index.html。ファイル名1個のみで、複数候補・`/`を含むパス・`.` / `..` は起動エラー(確定、C-15)。存在は起動条件にせず、要求時の未発見はautoindexへ。選ばれたindex.pyにも既存のCGI判定を適用する |
-| アップロード許可/保存先 | location | `upload_store`(確定、C-18) | 小文字offまたは保存先パス1個。省略時は保存無効・保存先の自動補完なし(C-07)。絶対パスと設定ファイル基準の相対パスを受理。起動時に既存ディレクトリであることを検証し、自動作成しない。GET公開先はroot/aliasで別途指定。CGIとlocation・保存先を分ける |
-| CGI | location | `cgi_extension .py /usr/bin/python3`(決定済み) | 必須部分はPythonのみ。省略時はCGI無効・拡張子とPythonのパスの自動補完なし(確定、C-07)。小文字offまたは「拡張子＋Python絶対パス」1組のみ(C-19)。拡張子は`.`＋ASCII英数字1文字以上で大小区別。不正な拡張子・引数数・相対パスは起動エラー。Pythonの通常ファイル確認とaccess(X_OK)はC-40で確定 |
-| server_name(対象外) | server | `server_name` | Hostによる仮想ホスト選択とともに実装しない(確定、C-12)。指定時は設定エラー。HTTP/1.1のHost検証は維持 |
-
-**確定(C-22)**: returnがあるlocationはリダイレクト専用。allow_methodsは併記可・省略時GETのみとし、許可メソッドを確認してからリダイレクトする。禁止された対応メソッドは405とAllowで応答する。root / alias / index / autoindex / upload_store / cgi_extensionはoffでも併記を拒否し、配信設定の既定値補完・配信パス検証は行わない。
-
-- **確定(C-41)**: 同じlocation内の設定を、既定値補完後の有効/無効と許可メソッドで検証する。配信locationでPOSTを許可するならupload_storeまたはcgi_extensionのどちらか1つが有効であることを要求し、両方無効なら起動エラーとする。同じlocationでupload_storeとcgi_extensionが両方有効なら、POST許可の有無によらず起動エラー。CGI有効locationのallow_methodsにDELETEが含まれる場合も起動エラーとする。省略/offは無効として扱い、設定行の存在だけで有効とは判定しない。returnのリダイレクト専用locationはPOST処理先の検証対象外とし、C-22の併記禁止規則を維持する。CGIやuploadを有効にしてもPOSTは自動許可せず、GETのみでCGIを使う設定やupload有効かつPOST不許可の設定も受理する。起動後のCGI用locationへのDELETE要求は引き続き405とし、CGIファイルの削除へ進めない。CGIの拡張子判定、uploadとCGIのディスク上の保存先を分ける既決定も維持する。
-
-**検証(validation)の確認項目**: 既定値補完後の検証、`location` パスが `/` 始まりか、同一server内の同一prefixの重複location拒否(C-14で確定)、root/aliasのディレクトリ存在(C-40)、`return` と配信ディレクティブの併記禁止(offでも拒否、C-22で確定)、補完したlistenを含む重複・競合検証(C-12で規則は確定済み)。既定値のある項目の省略自体はエラーにしない。
-
-- **確定(C-40)**: 起動時は、配信locationのroot/aliasと有効なupload_storeについて、パス解決・既定値補完後にstatで存在とディレクトリ種別を確認し、確認失敗・非ディレクトリなら設定エラーで起動を中止する。root省略時のhtmlにも適用し、conf/default.confならconf/htmlが必要になる。ディレクトリや親ディレクトリは自動作成しない。ディレクトリの読み取り・書き込み等の権限を追加のaccess検査で事前確認せず、実際の配信・一覧取得・保存時に失敗を処理する。有効なCGI設定のPythonはstatで存在する通常ファイルであること、access(path, X_OK)の事前確認が成功することを要求し、失敗したら起動エラーとする。起動時にPythonを試験実行しない。indexの存在は起動条件にせず、error_pageの不在・読み取り不可も起動エラーにしない。これらは要求時に既存のindex/autoindex・内蔵エラーページの規則で処理する。個々のHTML・画像・CGIスクリプトを起動時に全件検査しない。リダイレクト専用locationはC-22に従い配信設定を補完・検証しない。起動時検査は実行時の成功を保証するものではなく、ファイル消失・権限変更やexecve等の失敗は引き続き要求時に処理する。symlinkの運用前提と検出機能を省くC-26は維持する。
+設定値・指定回数・既定値・起動時検証・組み合わせ・型/APIはC-01〜42で合意済み。一覧と詳細は [05](05_config_agreement.md#config-decisions) に一本化する。HTTP側の処理方式が未決定でもConfigの合意を未確定へ戻さない。
 
 ## C3 location マッチングとパス変換 【rysato, R:M, D:M, ★★★】
 
-- **確定(C-23)**: queryを除いたURLパスに対する文字列前方一致とし、一致する最も長いprefixを選ぶ。設定順には依存せず、パス要素の境界は一致条件にしない。`/a` は `/a`・`/a/file.txt`・`/abc` に一致する。ディレクトリ配下を指定するには `/a/` と書き、これは `/a/file.txt` には一致するが `/a`・`/abc` には一致しない。`/`・`/a`・`/a/b/` があれば、`/a/b/file.txt` には `/a/b/`、`/abc` には `/a` を選ぶ。URIの分離・デコード・処理順序はC-24で確定。正規化はC-25で確定。末尾スラッシュ補完リダイレクトはC-27に従う。
-- **確定(C-38)**: Configのlocation prefixは先頭`/`を必須とし、ASCII英数字(A-Z / a-z / 0-9)と `/ - . _ ~` だけを受理する。連続する`//`、パス要素全体が`.`または`..`の指定は設定エラーで起動を中止する。queryや%エンコード、非ASCII文字など許可外の文字を受け付けず、設定値をデコード・正規化して救済しない。`/`・`/images/`・`/cgi-bin/`・`/v1.0/`・`/.hidden/`・`/file..txt`は受理する。prefixの比較はOSによらず大小文字を区別し、`/Images/`と`/images/`は別のprefixとする。`location /`は推奨するが必須ではなく、一致するlocationがなければ404。各serverにlocationを1個以上要求するC-37は維持する。alias使用時のprefix末尾`/`必須(C-09)も維持し、root使用時は末尾`/`を必須にしない。この文字制限はConfigのprefixだけに適用し、HTTP要求URLやファイル名の受付範囲には一律適用しない。要求側はC-24・C-25のデコード・正規化後にC-23の最長前方一致で照合する。
-- URL→ファイルパス変換はrootでURI全体を追加、aliasでprefixを置換する(確定)。URL正規化はC-25に従う。symlinkの運用前提と制限はC-26に従う。CGIの結合・検証はCGI-84〜90で確定済み。通常配信等の残る詳細はH2と合わせて決める。
-- **確定(C-24)**: 最初のリテラルの `?` でパスとqueryを分離し、パスの `%XX` を1回だけデコードする。その後にパスを正規化してからlocationを選ぶ。queryは未デコードのままCGIのQUERY_STRINGへ渡す。パスでは `%20` は空白、`%2F` / `%2f` は区切りの `/` となり、`+` は空白へ変換しない。`%252e` は `%2e` までとし、HTTP/Router/CGIへの受け渡しで二重デコードしない。復号して生じた `?` をqueryの区切りとして再解釈しない。パスにある `%` / `%2` / `%GG` 等の不正なパーセント表記と `%00` (NUL) は400とする。この400規則はパスについての合意であり、queryの受付検証を新たに定めるものではない。`.` / `..` / 連続スラッシュの正規化はC-25に従い、symlinkの運用前提と制限はC-26に従う。その他の不正パスとファイルパスの結合・検証の詳細は別途確定する。
-- **確定(C-25)**: C-24で1回デコードしたURLパスをlocation選択前に正規化する。連続する `/` は1個にまとめ、`/` で区切った要素全体が `.` なら除去、`..` なら直前の要素を1個取り除く。URLの先頭の `/` より上へ戻ろうとした時点で400とする。`file..txt`・`.hidden` 等は変更しない。末尾 `/` と、末尾 `/.`・`/..` が表すディレクトリの末尾 `/` を保つ。例: `/a//b.txt`・`/a/./b.txt`・`/a/x/../b.txt` は `/a/b.txt`、`/a/../b.txt` は `/b.txt`、`/a/.`・`/a/b/..` は `/a/`、`/a/..` は `/`。`/../secret.txt`・`/a/../../secret.txt` は400。`/a/%2e%2e/b.txt` はデコード後に `/b.txt` としてlocationを選ぶ。この処理はURL文字列の整理であり、symlinkの扱いと公開範囲の保証の制限はC-26に従う。ファイルパスの結合・検証の残る詳細は別途確定する。末尾 `/` のない実ディレクトリへのGETはC-27に従う。
-- **確定(C-15)**: 存在するディレクトリへのGET要求はindexを探し、なければautoindexがonなら一覧、offなら403。ディレクトリ自体がなければ404。indexの読み取り不可は一覧表示への切り替え条件にしない。末尾`/`なしの実ディレクトリへのGETはC-27の301を先に返す。この判断フローがRouterの中核仕様。
-- **確定(C-27)**: GETでlocationを選択し許可メソッドを確認した後、選択した配信locationのroot/aliasで解決した対象が実ディレクトリで、正規化後のURLパスが `/` で終わらなければ、末尾 `/` 付きURLへ301を返す。queryは保持し、例えば `/docs?lang=ja` の移動先のパスとqueryは `/docs/?lang=ja` とする。末尾 `/` 付きの要求でC-15のindex→未発見ならautoindexの処理へ進む。POST・DELETEにはこの自動補完を適用せず、各メソッドの処理規則に従う。returnがあるlocationはC-21・C-22の指定を使う。location選択は変更せず、`location /docs/` を `/docs` に一致させる特別扱いは追加しない。Locationのホスト名・ポートの出所はC-28に従う。パスの再エンコードとqueryの保持はC-29に従う。
-- **確定(C-28)**: C-27の自動補完のLocationは `http://` で始まる絶対URLとする。有効なHostがあればホスト名と明示ポートを使い、HostにポートがなければURLにも追加しない(HTTPの既定80番)。HTTP/1.0でHostがない場合だけ、acceptした接続のサーバー側IP・ポートをgetsocknameで取得して使う。listenのワイルドカード値0.0.0.0やクライアント側IP・ポートを代用しない。HTTP/1.0・1.1ともHostの重複・不正は400、HTTP/1.1のHost欠落も400。tasugiyaが接続のサーバー側IP・ポートを取得して渡し、rysatoがHostの検証とURL組み立てを担当する。Forwarded / X-Forwarded-*を参照せず、ConfigのreturnはC-21の固定URLを使う。パスの再エンコードはC-29に従う。Hostの受付範囲はC-30に従う。接続情報の受け渡しAPI・取得失敗時の扱いは別途確定する。
-- **確定(C-30)**: Host値は前後のSP/HTABを取り除いてから、IPv4またはASCIIホスト名と任意の `:port` として検証する。ホスト名はASCII英数字と `-` からなる空でない要素を `.` で区切り、各要素の先頭・末尾は英数字とする。localhostのような単一要素、大文字・小文字、末尾の `.` 1個を受理する。IPv4はドット区切りの4個の十進数で各0〜255。ポートは省略可、明示するなら十進数の1〜65535で空値は拒否する。Host全体の空値、途中の空白・タブ、重複、不正な値、スキーム・パス・ユーザー情報付きの値は400。IPv6の角括弧表記とHost内のパーセント表記は受付対象外として400にする。DNSへの問い合わせや名前の実在確認は行わず、Hostによる仮想ホスト選択も行わない。HTTP/1.0のHost省略可、HTTP/1.1の欠落400、自動補完URLでの使用方法はC-28を維持する。この受付範囲は本課題用の限定仕様であり、RFCのHost構文全体を実装するものではない。
-- **確定(C-29)**: C-27の自動補完のLocationを生成するときは、デコード・正規化済みのパスに末尾 `/` を付け、ASCII英数字(A-Z / a-z / 0-9)・`- . _ ~` と区切りの `/` だけをそのまま出力する。それ以外はバイトごとに大文字16進の `%XX` へ変換する。例: 内部パス `/hello world` → `/hello%20world/`、`/a+b` → `/a%2Bb/`、`/name?part` → `/name%3Fpart/`、`/literal%20` → `/literal%2520/`。URLとして既にエンコード済みの文字列へ重ねて適用せず、内部のデコード済みパスから一度生成する。queryは元の表記を保持して後ろに付け、デコードも再エンコードも行わない。例えばHost localhost:8080への `/hello%20world?name=a+b` は `http://localhost:8080/hello%20world/?name=a+b` へ案内する。Configのreturnの固定URLはこの変換の対象にしない。
+query分離→パスの1回デコード→正規化→文字列の最長前方一致→root/aliasによるパス変換の順に処理する(C-01・23〜25)。GETの末尾/補完、Hostの検証、補完URLの生成も合意済み(C-27〜30)。詳細と具体例は [05](05_config_agreement.md) を参照する。
+
+symlinkを置かない運用前提はC-26、CGIのファイル・パス検証はCGI-84〜90に従う。通常静的配信はHTTP-20〜26で合意済み。アップロード・DELETEの検証の残る詳細は、各節と [04の残件](04_testing_and_workplan.md#remaining-design) で扱う。
 
 ## C4 静的ファイル配信 【rysato, R:M, D:M, ★★★】
 
-- `stat`/`access` による存在・種別(通常ファイル/ディレクトリ)・読み取り権限の判定と、**結果→ステータス対応**(なし=404、権限なし=403、ディレクトリ→C3)。
-- `Content-Type`(H10)、`Content-Length`、`Last-Modified`(任意)。大きなファイルの扱い(N4/N10)。
-- 条件付きリクエスト(`If-Modified-Since`、304)、Range(206)は**課題必須ではない**。スコープ外として明文化するかを決める(ブラウザ動画再生などでRangeが使われる点に注意)。
-- **確定(C-26)**: 公開・CGI・アップロード領域は二人が管理し、配下にsymlinkを置かない運用前提とする。Webservにはsymlinkの検出・拒否機能を実装せず、関連するConfig項目も増やさない。symlinkが置かれた場合はOSがリンク先を辿り得るため、公開領域外へのアクセスを完全に遮断する仕様とはしない。URL由来のパスにはC-24・C-25のデコード・正規化を適用し、その処理だけでsymlink経由の領域外アクセスを防げるとは扱わない。CGIのファイル存在・種別・アクセス失敗とroot/aliasのパス結合はCGI-84〜90で確定済み。通常配信・アップロード名等の残る実装規則は別途確定する。
-- 隠しファイルの配信・一覧表示は未確定。参考: NGINXは既定でsymlinkを検査せず許可する。[NGINX disable_symlinks](https://nginx.org/en/docs/http/ngx_http_core_module.html#disable_symlinks)。課題PDF印刷ページ6にはstatはあるがlstat / realpath / openat / fstatatは記載されていない。statはリンク先を参照する。[stat / lstat](https://man7.org/linux/man-pages/man2/stat.2.html)。
+**合意済み(HTTP-20〜26)**: 正本は [Requirementsの静的ファイル](../Requirements.md#http-static-files)。以下は理解のための要点。
+
+- statで通常ファイル・ディレクトリを分け、FIFO/デバイス等は開かず403。空ファイルも200。ディレクトリはC-27→C-15の末尾/補完・index優先・未発見ならautoindexを維持する。存在するindexが読めない/通常ファイルでない場合は403とし、一覧へ切り替えない。選ばれたindexのCGI判定は維持する。
+- stat/access(R_OK)の失敗は、ENOENT/ENOTDIR=404、EACCES/EPERM=403、ENAMETOOLONG=414、その他=500。事前確認後のopen/読み取り失敗は500。read等の後のerrno分岐は行わない。
+- 読み取り成功を確認してから200を送り、実際の本文バイト数からContent-Lengthを作る。静的ファイルのバイト列は加工しない。通常ファイルI/O・保持・全体メモリはHTTP-71・72の採用案に従う。
+- Content-TypeはHTTP-23の固定表を使う。MIMEの比較だけASCII大小文字非区別で、ファイルパス/CGI拡張子の比較を変更しない。
+- 名前が.で始まる対象も通常どおり扱う。autoindexでもHTTP-27に従い隠し項目を表示する(.と..は除く)。symlinkを置かない運用前提と検出機能を省くC-26を維持する。statはリンク先を参照するため、この運用前提を外した場合のアクセス先を制限する機能ではない。[Linux stat](https://man7.org/linux/man-pages/man2/stat.2.html)
+- 静的配信ではRange/条件付き要求を解釈せず、206/416・条件判定による304/412・ETag/Last-Modified生成を追加しない。Range無視はRFCで許容されるが、条件付き要求の一律省略にはRFC上の必須評価を外す判断も含む。課題向けの限定仕様とRFC全文準拠を区別する。CGIのヘッダー転送規則は維持する。
+
+実装・受入試験は未完了。
 
 ## C5 autoindex 【rysato, R:S, D:S, ★★】
 
-- **確定(C-16)**: 設定は小文字on/offのみ・HTML出力固定。indexがない場合に一覧を返し、offでも個別ファイルへのアクセスは禁止しない。以下の並び順・表示項目等は残る実装仕様として決める。
+**合意済み(HTTP-27〜32)**: 正本は [Requirementsのautoindex](../Requirements.md#http-autoindex)。C-15・16・27のindex優先・on/off・HTML形式・末尾/補完を維持する。
 
-- `opendir/readdir/closedir`、`stat` で種別・サイズ・更新時刻。`.` と `..` の扱い、ソート順(ディレクトリ先頭など)。
-- **HTMLエスケープ**(ファイル名に `<>&"` が含まれる場合のXSS対策)と、URLエンコード(リンクのhref)。
-- 結果の生成方法(HTML文字列組み立て)。巨大ディレクトリ時のサイズ上限。
+- 各項目の名前とリンクだけを表示し、種類/サイズ/更新日時や項目ごとのstatは追加しない。隠し項目も載せるが.と..は除き、親へのリンクは作らない。空の一覧も200。掲載はアクセス成功を保証しない。
+- 元の名前を大小文字を区別するバイト順で昇順にし、ディレクトリ優先や読み順によるソートをしない。
+- 表示名はHTMLエスケープ、hrefは正規化済みURLパスと項目名をpercent-encodingして作る。物理パス/queryは使わない。ディレクトリへのリンクにも末尾/を追加せず、クリック後にC-27を適用する。
+- opendir失敗は404/403/414/500へ分類、readdir途中/closedir失敗は500。readdirのNULLが正常終端かは直前のerrno=0と結果で判断する。列挙・生成・closeが成功してから200を返し、途中の一覧は成功応答にしない。
+- 完成するHTML本文は8 MiBまで。列挙中からエスケープ後の長さを確認し、超過で打ち切り500。取得済み一覧を破棄してディレクトリを閉じる。ページ分割・件数上限・Config項目は追加しない。
+
+実装・受入試験は未完了。全体メモリ/I/OはHTTP-71・72の採用案に従い、実負荷で検証する。
 
 ## C6 アップロード 【rysato, R:L, D:L, ★★★】
 
-**理解すべきこと**
-- アップロード方式の選択肢: (a) `multipart/form-data`(ブラウザのフォーム標準)、(b) 生のボディ(`curl --data-binary`、`PUT`的な)。**課題は「クライアントがファイルをアップロードできる」とのみ規定**→評価でブラウザ/curlどちらを使うか不明のため、両方の対応範囲を決める(推奨: multipart対応+生ボディ対応の可否を判断)。
-- **multipart/form-data の構造**(RFC 7578 / RFC 2046 §5.1): `Content-Type: multipart/form-data; boundary=XXXX`、各パートは `--boundary CRLF part-headers CRLF CRLF data CRLF`、終端 `--boundary--`。パートヘッダー `Content-Disposition: form-data; name="..."; filename="..."`、`Content-Type`。
-  - boundary のクォート有無、境界文字列の検索がバイナリ安全(`\0`を含むデータ)であること(`std::string`で可だが `c_str()` 依存を避ける)。
-  - 複数ファイル/ファイル以外のフィールドの扱い。
-- 保存先と**ファイル名の扱い**: クライアント指定の `filename` を信用しない(`../` 等のトラバーサル、特殊文字、既存ファイル上書き、拡張子による実行(CGI拡張子のアップロード=リモートコード実行))。サニタイズ規則・衝突時の命名(連番/タイムスタンプ)を決める。
-- ボディ全体をメモリに保持するか(`HttpRequest::getBody()` は std::string 返却=全メモリ保持の設計)。上限は `client_max_body_size` で制御。大きいファイルでのメモリ・性能の許容範囲を明文化。
-- 応答: 201 + `Location`(保存先URL)、または 200 + 結果HTML。失敗時: 413(上限超過)、400(multipart不正)、403/500(書込失敗)、415(未対応のメディア型)。
-- **確定(C-18)**: 保存先は起動時に存在・ディレクトリ種別を検証し、自動作成しない。ディレクトリへの追加の権限事前検査は行わない(C-40)。実際の保存失敗の扱いは別途確定する。
+**合意済み(HTTP-33〜44)**: 正本は [Requirementsのアップロード](../Requirements.md#http-upload)。POST許可・upload_store有効・CGIとの分離を維持する。CGIへのPOSTには本節の受付制限を適用しない。
+
+- 受付はmultipart/form-dataの1ファイル。ブラウザのフォーム/curl -Fに対応し、他形式・Content-Type欠落/空は415。ファイル0/2個以上は400。通常フォーム項目は検査して捨て、filename空は未選択、名前あり/中身0バイトは空ファイルとして保存する。
+- boundaryは引用符付き/なし、RFCの1〜70文字、大小文字区別。区切り/終端を確認し、区切り行末のSP/HTABを受理、前後の付加部分を捨てる。欠落・重複・不正は400。全体を検査してから保存する。
+- 各パートのContent-Disposition: form-data/nameを検査し、パートヘッダーはCRLF・折り返しなし・終端空行込み8 KiBで超過400。Content-Typeは保存に使わない。NUL/改行を含む本文を加工せず保存し、要求Content-Encodingが非空なら415、パートContent-Transfer-Encodingは省略/空/binary以外415。ネスト解析を追加しない。
+- filenameの/・逆斜線の最後の名前だけ使う。空・.・..・制御文字は400。空白/非ASCIIを保持し、percent-encodingをデコードせず、upload_store＋名前へ保存する。POST先URLはlocation選択に使う。
+- O_CREAT/O_EXCL/O_WRONLY、mode 0600で新規作成し、同名対象409。上書き/採番なし。openの権限/読み取り専用403、保存名のパス長400、保存先消失/その他500。短いwriteは残りを続け、0以下/close失敗500。write後のerrno分岐なし。
+- パートヘッダー/区切りも要求本文上限に含め、超過413。追加のファイルサイズ上限なし。本文/I/Oの分割と全体メモリ管理は10/10。
+- 成功は200と保存名の結果HTML(HTMLエスケープを適用)。201/LocationというRFCの推奨と区別し、公開URLを自動推定しない。GET公開はroot/aliasを保存先へ対応させ、upload_storeから自動設定しない。
+- 保存途中の今回作成したファイルは削除する方針。削除失敗時はHTTP-49で合意済み、使用可能な削除手段はHTTP-50の未解決事項。既存対象を削除せず、元の500を成功へ変えない。
+
+単一ファイル等の受付制限はチーム方針であり、課題から各形式を個別に免除されたという意味ではない。実装・受入試験は未完了。
 
 ## C7 DELETE 【rysato, R:S, D:S, ★★】
 
-- 対象解決は静的配信と同じ(C3)。ファイルのみ許可か、ディレクトリ削除を許すか(許す場合 `rmdir` 相当は許可関数に**無い**: `unlink`/`remove`/`rmdir` は許可リストに載っていない → **DELETEの実装手段を確認**。許可関数に削除系がない点は要確認事項)。
-- 結果: 成功 204(または200)、404、403、405。
-- 削除対象を限定するか(例: アップロード先ディレクトリ配下のみ)—セキュリティ上、全ファイル削除可能は危険なので `allow_methods` と location 設計で制御する旨を明記。
+**動作方針は合意済み(HTTP-45〜49)、削除手段は未解決(HTTP-50)。** 正本は [RequirementsのDELETE](../Requirements.md#http-delete)。
 
-> **確認事項**: 許可関数リストに `unlink`/`remove` が含まれていない。DELETEでファイルを実際に削除する方法を課題/運営に確認する(`Requirements.md` を再確認)。解決しないとC7の仕様が書けない。
+- 通常locationのroot/aliasでGETと同じ規則で対象を解決し、通常ファイルだけを削除する。ディレクトリ/その他の種別は403。再帰削除・indexへの置き換え・GET用の末尾スラッシュ補完は追加しない。
+- 成功は204で本文/Content-Lengthなし。対象なし404、種別/権限/読み取り専用403、長すぎるパス414、その他500。allow_methodsによる405＋AllowとCGI用locationのDELETE禁止は維持する。
+- 保存失敗時は今回作成したファイルだけを削除する。後始末にも失敗したら元の500を維持し、残ったパスをログへ記録する。無期限に再試行せず、409等の既存ファイルへ触れない。
+
+`std::remove`もユーザー確認により使用不可。PDF一覧に削除関数がないため、追加・例外の規定の有無を確認する。動作合意だけで実装可能とは断定しない。RFCのDELETEの意味と実ファイル削除案の違い、配信だけ隠す方式を無断で代替しないことは正本を参照。実装・受入試験は未完了。
 
 ## C8 CGIプロセス制御(システムコール面) 【tasugiya(主)/共, R:L, D:L, ★★★】
 
 **理解すべきこと**
+
 - pipe×2→fork→子のdup2・不要端close・chdir・execveで起動する。**_exitとclock_gettimeはユーザー確認により使用不可(CGI-119)**。子の失敗時の終了と計時は9/10の現時点の採用案で実装し、実際の動作確認で見直し得るものとして扱う。
 - 親: 使わない端の close、**パイプfdをノンブロッキング化し poll に登録**(CGI出力の読み取り、ボディの書き込み。課題の「pipeは必ずpoll経由」要件)。
 - **fork は CGI 実行にのみ使用可**。ここ以外で `fork` しない。
 - `fork` 後に子で C++ オブジェクトが多数存在する状態 → 子は `execve` 直前までに**複雑な処理をしない**(メモリ確保など)、`envp` は fork 前に構築しておく(`char**` の組み立て・解放責任の明確化)。
 - 子プロセス回収: `waitpid`(`WNOHANG`)、ゾンビ防止。タイムアウト時の `kill(pid, SIGKILL)` → `waitpid`。
-- `execve` 失敗の検知方法(子の終了方法と親への通知方法を確定する。応答は502で確定、C12)。
+- `execve`等の子側起動失敗は502。子の明示的解放とmainへのreturn、親のwaitpidによる検出は、C12の項目9/10の現時点の採用案に従う。
 - インタプリタ/スクリプトの検証: インタプリタは存在・実行権限、Pythonへ引数として渡すスクリプトは通常ファイルであること・読み取り権限を確認する。スクリプト自身の実行権限は要求しない。
 - fd継承はCGI-116で確定済み。listen/acceptソケットと全CGIパイプにF_SETFD/FD_CLOEXECを設定し、子の0/1/2だけを継承する。
 
 ## C9 CGI仕様(RFC 3875) 【rysato(主)/共, R:L, D:L, ★★★】
 
 **理解すべきこと**
+
 - **メタ変数**(RFC 3875 §4.1)。決定事項に挙がった `REQUEST_METHOD, SCRIPT_NAME, PATH_INFO, QUERY_STRING, CONTENT_LENGTH, CONTENT_TYPE, SERVER_PROTOCOL, GATEWAY_INTERFACE, SERVER_NAME, SERVER_PORT, REMOTE_ADDR` + `HTTP_*`。それぞれの**値の作り方**:
   - `SCRIPT_NAME`/`PATH_INFO` の分離(`/cgi/test.py/extra/path` → script=`/cgi/test.py`、PATH_INFO=`/extra/path`)はCGI-25、各環境変数の規則はCGI-29・CGI-30で確定済み。
   - 必須部分はPythonのみとし、PHP固有の環境変数は追加しない(確定、C12)。基本的なPATH_INFO対応は確定済み。CGI-50の環境変数の限定に従い、`PATH_TRANSLATED`は追加しない。
   - `CONTENT_LENGTH` はCGI-31で確定済み。復号後の本文が1バイト以上ならそのバイト数、0バイトなら空文字列とする。`CONTENT_TYPE` は要求ヘッダーの値をパラメーターも含めて渡し、ヘッダーなしの場合は省略する(CGI-32)。`QUERY_STRING` は未デコードのまま(CGI-28)。
-  - `HTTP_*` 変換はCGI-39で確定済み: ヘッダー名をASCII大文字化、`-`→`_`、接頭辞`HTTP_`。値は前後SP/HTAB除去後に大小文字を保持する。`Content-Type`/`Content-Length` は専用変数だけで渡し、HTTP_*から除外する(CGI-40)。`Proxy` ヘッダーはCGI-45で除外を確定済み。名前の文字範囲はCGI-47で確定済み。転送対象の同名ヘッダーの重複拒否はCGI-48、HTTP_*の空値省略はCGI-49で確定済み。入力ヘッダーの残る規則はCGI-75〜83で確定済み。受け渡しAPIはC12で確定する。
+  - `HTTP_*` 変換はCGI-39で確定済み: ヘッダー名をASCII大文字化、`-`→`_`、接頭辞`HTTP_`。値は前後SP/HTAB除去後に大小文字を保持する。`Content-Type`/`Content-Length` は専用変数だけで渡し、HTTP_*から除外する(CGI-40)。`Proxy` ヘッダーはCGI-45で除外を確定済み。名前の文字範囲はCGI-47で確定済み。転送対象の同名ヘッダーの重複拒否はCGI-48、HTTP_*の空値省略はCGI-49で確定済み。入力ヘッダーの残る規則はCGI-75〜83で確定済み。受け渡しAPIはCGI-91〜98で合意済み(C12)。
+
 - **リクエストボディの渡し方**: un-chunk 済みのボディを子のstdinへ全て書き、書き終えたらstdinを **close(EOF)**(課題要件)。ボディが大きいと pipe バッファ(64KB程度)を超える → **書き込みもノンブロッキング+POLLOUT**(死活: 子が出力を溜めて読まないとデッドロックし得る → 読み/書きを同時にpoll)。
 - **CGI出力のパース**(§6): `CGI-response = document-response / local-redir-response / client-redir-response / client-redirdoc-response`。ヘッダー部(`Content-Type`, `Status`, `Location`, 任意ヘッダー)+空行+ボディ。
   - `Status: 404 Not Found` → HTTPのステータス行へ変換。通常の文書応答で省略された場合は200。リダイレクトは別の規則で扱う。
@@ -123,183 +100,36 @@ CGIの確定事項は [Requirements.md](../Requirements.md) と末尾の「C12 C
   - 通常の文書応答で `Content-Type` がない場合は不正なCGI出力として502。Locationのみのリダイレクトとは区別する。
   - **ヘッダー区切りが LF/CRLF 両方**あり得る(Pythonの`print`はLF)。
   - **`Content-Length` が無ければ EOF を終端とする**(課題要件)。サーバー側は終端後に自分で `Content-Length` を付けて返す(接続は `Connection: close`)。
+
 - 終了ステータス(非0)はCGI-19のエラー対応に従う。stderrはCGI-51に従いWebservのstderrを引き継ぎ、stdoutへ混ぜず専用の監視・収集処理も追加しない。
 
 ## C10 CGIとイベントループの統合 【共, R:M, D:M, ★★★】
 
-- CGI状態を独立した `CgiProcess` に持たせ、EventLoopが **fd→オブジェクトの対応表**で引くことは決定済み。`Client::WAITING_CGI` は状態設計案。Clientとの関連付けやポインタの寿命管理はC12で確定する。
+- CGI状態を独立した `CgiProcess` に持たせ、EventLoopが **fd→オブジェクトの対応表**で引くことは決定済み。`Client::WAITING_CGI` は状態設計案。Clientとの関連付けやポインターの寿命管理はCGI-99〜106で合意済み(C12)。
 - 複数のfd(CGIのstdin書込/stdout読取)を毎周のpollfd再構築で扱う方法。
 - **失敗パターンの網羅**: execve失敗、CGIがすぐ終了、出力なし、出力途中でクライアント切断、タイムアウト(10秒→kill→504)、巨大出力(上限)、子が書込を詰まらせる、複数同時実行。アプリケーション独自のCGI同時実行数上限は設けず、pipe/fork失敗は500として後始末する(C12)。
-- CGI結果のHttpResponseへの変換はrysatoのRouter::parseCgiOutput、即時応答/CGI要求の区別はRouter::routeが担当する(CGI-91〜98確定)。所有権・寿命はCGI-99〜106で確定済み。後始末はCGI-107〜118で確定済み。起動失敗検出等はC12の9/10以降で合意する。
+- CGI結果のHttpResponseへの変換はrysatoのRouter::parseCgiOutput、即時応答/CGI要求の区別はRouter::routeが担当する(CGI-91〜98確定)。所有権・寿命はCGI-99〜106で確定済み。後始末はCGI-107〜118で確定済み。起動失敗検出・計時は項目9/10の現時点の採用案、エラー適用境界はCGI-128〜135の確定規則に従う。
 
 ## C11 Cookie/セッション(ボーナス) 【rysato, R:M, D:M, ★】
 
 - `Set-Cookie`/`Cookie` の形式(RFC 6265)、属性(`Path`, `Expires`/`Max-Age`, `HttpOnly`, `SameSite`)。セッションIDの生成(乱数源: 許可関数に `rand` 系があるか要確認)、サーバー側セッション保管(メモリ上のmap)。
 - ボーナスは**必須部分が完璧な場合のみ評価**されるため、優先度は最低。複数CGIタイプ対応(PHP等)も同様。
 
-## C12 CGIの最小構成・決定事項と残る合意 【共】
+<a id="cgi-details"></a>
 
-記録日: 2026-10-04。CGI-25〜43追記: 2026-10-05。CGI-44〜83追記: 2026-10-06。課題PDF Version 24.1と参考資料を踏まえ、必須部分の実装量を抑えるための合意状況を記録する。
+## C12 CGIの最小構成・合意済み規則の説明 【共】
 
-**CGIの10項目は合意完了(CGI-01〜135)。** 起動・計時のCGI-120〜127は現時点の代替案で、実装・実際の動作で見直し得る。合意完了は実装・結合試験合格を意味しない。確定事項は [Requirements.md](../Requirements.md) のCGI節と同じID・内容で記録する。変更時は関連するHTTP・I/O・Config・テスト計画も合わせて更新する。
+記録日: 2026-10-04。CGI-25〜43追記: 2026-10-05。CGI-44〜83追記: 2026-10-06。最新の合意反映・資料整理: 2026-10-07。課題PDF Version 24.1と参考資料を踏まえ、必須部分の実装量を抑えるための合意状況を記録する。
 
-### 決めたこと：確定事項
+**CGIの10項目は合意完了(CGI-01〜135)。** 起動・計時のCGI-120〜127は現時点の代替案で、実装・実際の動作で見直し得る。合意完了は実装・結合試験合格を意味しない。決定表の正本は [RequirementsのCGI節](../Requirements.md#cgi-decisions) とし、本書には規則の説明・具体例・共有APIを記録する。変更時は関連するHTTP・I/O・Config・テスト計画も合わせて更新する。
 
-CGI-120〜127は**現時点で採用する代替案**。実装・実行環境・動作確認の結果で見直し得るもので、動作確認済み・最終固定の仕様とは扱わない。詳細は03の残項目9/10に従う。子の起動失敗時にWebservが所有するメモリを明示的に解放し、親用の停止・回収処理を実行しない方針は合意済み。具体的な終了・解放経路は代替案として実装・動作確認で検証する。
+### 決定表と採用案の位置付け
 
-| ID | 項目 | 決定 |
-|---|---|---|
-| CGI-01 | 対応言語 | 必須部分ではPythonのみ。PHP固有の対応は作らない |
-| CGI-02 | 起動方法 | 設定したPythonの絶対パスを `execve` で実行する。シェルやshebangの解釈は実装しない |
-| CGI-03 | 入力 | リクエストを受信・復号してから起動する。クエリは環境変数、ボディは加工せずstdinへ渡す |
-| CGI-04 | 出力 | stdoutを上限付きで蓄積し、EOFと子の終了を確認してからHTTP応答を作る。ブラウザへの逐次転送はしない |
-| CGI-05 | CGIの種類 | 通常のCGIだけを対象とする。HTTPレスポンス全文を直接出すNPH、FastCGI、常駐プロセスは対象外 |
-| CGI-06 | 周辺機能 | 認証、セッション、逆引きDNS、PHP専用環境変数は追加しない。C11は必須部分の実装対象に含めない |
-| CGI-07 | Config | 既存の `cgi_extension` を使う。タイムアウトや出力上限の設定項目は増やさず、まずコード内定数にする |
-| CGI-08 | 起動条件 | 選択されたlocationのCGI設定と、設定した拡張子で実行対象を判定する。実行するスクリプトは実在する通常ファイルとして確認する |
-| CGI-09 | メソッド | CGIはGET/POSTに限定する。DELETEは通常locationで提供し、CGI用locationへのDELETEは405にする。CGIファイルの削除処理へ進めない |
-| CGI-10 | index | `/cgi/` のようなディレクトリ要求で、設定されたindexとして `index.py` が選ばれた場合も、同じCGI実行判定を適用する。index未指定時に `index.py` を自動補完する意味ではない |
-| CGI-11 | 後続パス | `/cgi/test.py/extra` の基本的な後続パスに対応する。スクリプトを示すURL上のパスをSCRIPT_NAME、後続部分をPATH_INFO、`?`以降をQUERY_STRINGとして渡す。後続部分の意味はPython側が解釈する |
-| CGI-12 | アップロードとの分離 | アップロード保存とCGI実行のlocation・ディスク上の保存先を分ける。アップロード先ではCGIを実行せず、CGI実行場所にはアップロードさせない |
-| CGI-13 | 通常の文書応答 | Content-Type・空行・本文を解釈する。通常の文書応答ではContent-Typeを要求し、最初の空行より後ろを本文として扱う |
-| CGI-14 | Status | CGIのStatusをHTTPステータス行へ反映し、Statusヘッダー自体はクライアントへ転送しない。通常の文書応答でStatus省略時は200とする |
-| CGI-15 | ヘッダーの改行 | CGI出力のヘッダーはLF/CRLFの両方を受理する。HTTP応答のヘッダーはCRLFで生成し、本文の改行はこの変換の対象にしない |
-| CGI-16 | クライアント向けリダイレクト | 絶対URLのLocationだけを返すCGI応答は、Locationを伴う302のHTTP応答に変換する |
-| CGI-17 | Content-Length | 長さの指定がなければEOFまで読み、本文の実際のバイト数からHTTP応答のContent-Lengthを生成する。指定がある場合もCGI-04の方針で蓄積し、宣言値と本文の実長を照合する。不一致は502とする |
-| CGI-18 | 内部リダイレクト | ローカルパスのLocationだけを返してサーバー内部で再処理するCGI応答は対象外とする。Configで指定するHTTPリダイレクトは引き続き実装する |
-| CGI-19 | エラー対応 | スクリプトなしは404、読み取り不可は403、pipe/fork失敗は500、exec失敗・子の異常終了・不正なCGI出力は502とする |
-| CGI-20 | 出力サイズ上限 | CGI 1件あたりヘッダー8 KiB、ヘッダーを含むstdout全体8 MiBをコード内定数の初期値として採用する。読み取り中に超過を検出し、CGIを打ち切って502とする。入力ボディ上限は既存のConfigを使う |
-| CGI-21 | 同時実行数 | アプリケーション独自のCGI同時実行数上限は設けない。同時実行数を理由に503を返す分岐や待ち行列は設けない。OSの資源不足等によるpipe/fork失敗はCGI-19に従い500とする |
-| CGI-22 | タイムアウト | CGI起動からの経過時間10秒で打ち切り、504とする。途中で出力があっても期限を延長しない。EOF後に子が終了しない場合も期限の対象とする |
-| CGI-23 | クエリの引数展開 | `?a+b` 等のクエリをコマンドライン引数へ展開する機能は実装しない。クエリは未デコードのままQUERY_STRINGへ渡し、argvにはPythonとスクリプトの実行に必要な引数だけを渡す |
-| CGI-24 | 不正出力の扱い | 必要な形式・値・長さの検査を行い、不正なCGI出力は502にする。不正な値の推測・補正や、矛盾する値を選び直して受理する処理は実装しない。具体的な検証規則はCGI-52〜83に従う |
-| CGI-25 | スクリプトの特定 | 選択済みのCGI有効locationのroot/aliasで対応するパスを先頭から辿り、設定拡張子で終わる実在する通常ファイルに到達したところを実行対象とする。そのURL上のパスをSCRIPT_NAME、後続部分をPATH_INFOとする。拡張子だけで分割せず、同じ拡張子のディレクトリは実行しない |
-| CGI-26 | 実行パス・cwd | CGIの子プロセスで、実行するスクリプトが置かれたディレクトリへchdirしてから起動する。Pythonとスクリプトはともに絶対パスで指定する。cwdはPATH_INFOから決めず、追加のConfig項目も設けない |
-| CGI-27 | REQUEST_METHOD | 解析済みの要求メソッドをCGI起動時に必ずREQUEST_METHODへ設定する。CGI-09のGET/POST限定に従い、値はGETまたはPOSTとする。空文字列や省略にはしない |
-| CGI-28 | QUERY_STRING | CGI起動時に必ずQUERY_STRINGを設定する。値は最初の?より後ろの未デコードのクエリとし、?自体は含めない。クエリなし・末尾が?だけの場合は空文字列とし、省略しない |
-| CGI-29 | PATH_INFO | CGI起動時に必ずPATH_INFOを設定する。値は既存のデコード・正規化後のURLパスからCGI-25で切り分けた後続部分とする。追加パスがなければ空文字列とし、省略しない。スクリプト直後の/だけが残る場合は/とする |
-| CGI-30 | SCRIPT_NAME | CGI起動時に必ずSCRIPT_NAMEを設定する。値はデコード・正規化後のスクリプトを示すURLパスとし、PATH_INFOとクエリを含めない。root/aliasで解決したディスク上のパスは使わない。index経由では選ばれたindexのファイル名をURL上のディレクトリパスに付け、/cgi/でindex.pyを実行する場合は/cgi/index.pyとする |
-| CGI-31 | CONTENT_LENGTH | CGI起動時に必ずCONTENT_LENGTHを設定する。CGIへ渡す復号後の本文が1バイト以上なら、その実際のバイト数を10進数の文字列で設定する。0バイトなら空文字列とし、省略しない。長さ指定なし・Content-Length: 0・空のchunked本文も同じ0バイトの規則に従う |
-| CGI-32 | CONTENT_TYPE | 要求にContent-Typeヘッダーがあれば、HTTPパーサーで前後のSP/HTABを除去した値を、パラメーターも含めてCONTENT_TYPEへ設定する。本文が0バイトでもヘッダーがあれば設定する。ヘッダーがなければ変数を省略し、形式の推測や既定値の補完は行わない |
-| CGI-33 | SERVER_PROTOCOL | CGI起動時に必ずSERVER_PROTOCOLを設定する。値は解析済みの要求バージョンに従いHTTP/1.0またはHTTP/1.1とする。応答側のHTTP/1.0固定値で上書きせず、空文字列・省略にはしない |
-| CGI-34 | GATEWAY_INTERFACE | CGI起動時に必ずGATEWAY_INTERFACEを設定し、値は固定でCGI/1.1とする。要求のHTTPバージョンによって変えず、空文字列・省略にはしない。追加のConfig項目は設けない |
-| CGI-35 | SERVER_PORT | CGI起動時に必ずSERVER_PORTを設定する。値はその接続を受け付けたlistenのポート番号を10進数の文字列にしたものとし、標準ポートでも省略しない。空文字列・省略にはせず、追加のConfig項目は設けない |
-| CGI-36 | REMOTE_ADDR | CGI起動時に必ずREMOTE_ADDRを設定する。値はacceptで取得した接続元のIPv4アドレスをドット区切りの10進数で表したものとする。ポート番号は含めず、空文字列・省略にはしない。逆引きDNSは行わず、X-Forwarded-For等のHTTPヘッダーで値を上書きしない |
-| CGI-37 | SERVER_NAME | CGI起動時に必ずSERVER_NAMEを設定する。有効なHostがあればポート部分を除いたホスト名またはIPアドレスを使い、名前の大小文字は保持する。HTTP/1.0でHostがなければgetsocknameで取得した接続のサーバー側IPを使う。空文字列・省略にはせず、listenの0.0.0.0や接続元IPは代用しない。DNS照会やserver_name設定項目は追加しない |
-| CGI-38 | SERVER_SOFTWAREの省略 | 最小構成ではSERVER_SOFTWAREをCGIへ渡す環境変数に含めない。固定文字列の設定・生成処理と、そのためのConfig項目は実装しない |
-| CGI-39 | HTTP_*の変換 | 転送対象の要求ヘッダー名をASCII大文字に変換し、-を_へ置き換え、先頭にHTTP_を付けて環境変数名にする。値はHTTPパーサーで前後のSP/HTABを除去したものを使い、大小文字を保持する。転送対象・除外・重複・変換後の名前の衝突は別途確定する |
-| CGI-40 | 専用変数と重なるヘッダーの除外 | Content-TypeとContent-LengthはCGI-31・32の専用変数だけで渡す。HTTP_CONTENT_TYPEとHTTP_CONTENT_LENGTHは設定しない。専用変数の値と設定・省略の規則は既存の合意を維持する |
-| CGI-41 | Transfer-Encodingの除外 | 要求のTransfer-EncodingはHTTP_*へ転送せず、HTTP_TRANSFER_ENCODINGを設定しない。CGIには復号後の本文を渡し、本文長とstdinのEOFは合意済みの規則に従う |
-| CGI-42 | Connectionの除外 | 要求のConnectionヘッダー自体はHTTP_*へ転送せず、HTTP_CONNECTIONを設定しない。要求の値によらず、1接続1要求・応答後に切断する既存方針を維持する |
-| CGI-43 | その他の通信制御用ヘッダーの除外 | Keep-Alive・TE・Upgrade・Proxy-ConnectionはHTTP_*へ転送せず、HTTP_KEEP_ALIVE・HTTP_TE・HTTP_UPGRADE・HTTP_PROXY_CONNECTIONを設定しない。ヘッダー名による除外とし、この合意によって各ヘッダーの機能を新たに実装するものではない |
-| CGI-44 | Connectionに列挙されたヘッダーの除外 | Connectionの値に列挙されたヘッダー名もHTTP_*への転送対象から除外する。名前はカンマで区切り、前後のSP/HTABを除去して大小文字を区別せず照合する。この除外で本文の受信処理や専用環境変数の規則は変更しない |
-| CGI-45 | Proxyの除外 | 要求のProxyヘッダーはCGIへ転送せず、HTTP_PROXYを設定しない。Proxyヘッダーがあることだけを理由に要求を拒否する処理は追加しない |
-| CGI-46 | 認証用ヘッダーの除外 | Authorization・Proxy-AuthorizationはCGIへ転送せず、HTTP_AUTHORIZATION・HTTP_PROXY_AUTHORIZATIONを設定しない。これらの存在だけを理由に要求を拒否する処理や、認証情報を解釈する処理は追加しない |
-| CGI-47 | HTTP_*へ転送する名前の文字範囲 | HTTP_*へ転送するヘッダー名はASCII英数字と-だけで構成されるものに限定し、合意済みの除外規則を適用する。_やその他の記号を含む名前はCGIへの転送だけを省略し、HTTP要求としての受付は既存のtoken検証を維持する。同名ヘッダーの重複は別途確定する |
-| CGI-48 | HTTP_*へ転送する同名ヘッダーの重複 | CGIへの転送対象となる同名ヘッダーが複数行あれば400を返し、CGIを起動しない。名前の大小文字を区別せず、値が同じ場合も重複として扱う。結合・先勝ち・後勝ちの処理は実装しない。これはチームの受理範囲の制限とする |
-| CGI-49 | HTTP_*の空値 | HTTP層の検証を通った転送対象ヘッダーでも、前後のSP/HTABを除去した結果が空なら対応するHTTP_*を設定しない。空値はヘッダーなしと同じ省略扱いとし、個別ヘッダーの既存の検証規則は維持する |
-| CGI-50 | CGI用環境の構築 | 合意済みの11種類の環境変数と転送対象のHTTP_*だけから、execveへ渡すCGI用環境を構築する。各変数の設定・省略規則を維持し、親プロセスの環境変数はコピーしない。追加の環境変数用Config項目は設けない |
-| CGI-51 | stderr | CGIのstderrはWebservのstderrをそのまま引き継ぐ。stdoutへ混ぜず、専用のパイプ・監視・収集処理は追加しない。stderrへの出力だけでは502にせず、終了状態とCGI出力は既存の規則で検証する |
-| CGI-52 | CGI専用応答ヘッダーの重複 | CGI出力のContent-Type・Status・Locationは、それぞれ最大1行とする。同名ヘッダーが複数行あれば、名前の大小文字を区別せず、同じ値でも不正出力として502にする。結合・先勝ち・後勝ちの処理は実装しない |
-| CGI-53 | CGI出力ヘッダーの折り返し・終端 | CGI出力のヘッダー部分では、SP/HTABで始まる空でない行を502とし、継続行の結合や字下げ除去は行わない。空白だけの行も502とし、完全に空の行だけをヘッダー終端とする。本文の空白や改行は保持する |
-| CGI-54 | CGI出力ヘッダーのコロン直前の空白 | CGI出力のヘッダー名とコロンの間にSP/HTABがあれば、不正出力として502にする。空白を除去して受理する処理は実装しない |
-| CGI-55 | CGI出力ヘッダー名の文字範囲 | CGI出力のヘッダー名は空でないASCIIのtokenとして検証し、条件を満たさなければ不正出力として502にする。英数字とtokenで許可された記号を受理し、名前の補正は行わない |
-| CGI-56 | CGI出力ヘッダーの基本構文 | 各ヘッダー行を最初のコロンで名前と値に分ける。コロンがない行、ヘッダー終端の完全に空の行がないままEOFになった出力は502とする |
-| CGI-57 | CGI出力ヘッダーの改行詳細 | 行ごとにLFまたはCRLFを受理し、混在も許容する。LFを伴わない単独CRは502とする。本文の改行は変更しない |
-| CGI-58 | CGI出力ヘッダー値の空白・文字 | 値の前後SP/HTABを除去し、内部の空白・タブと大小文字は保持する。HTAB以外の制御文字とDELを含む値は502とし、非ASCIIのバイトは文字コード変換せず保持する。各ヘッダーの値の構文検証も行う |
-| CGI-59 | CGI出力ヘッダーの空値 | 前後SP/HTAB除去後に空ならヘッダー省略と同じ扱いとする。ただし重複検査を先に行う。通常の文書応答でContent-Typeが空なら必須ヘッダー欠落として502とする |
-| CGI-60 | CGI出力のContent-Type検証 | type/subtypeと、付いている場合のパラメーターの構文を検証し、不正なら502とする。未知の種類も構文が正しければ受理する。本文の形式推測・文字コード変換・登録一覧との照合は行わない |
-| CGI-61 | CGI出力のStatus検証 | 非空のStatusはASCII数字3桁のコード、区切りのSP、説明文の形式とし、説明文は空でもよい。コードの受理範囲は100〜599とする。構文不正・範囲外は502。説明文は検証後にHTTPステータス行へ使い、区切りSPは末尾空白除去前に確認する。1xxだけで終了するCGIはCGI-74に従い502とする |
-| CGI-62 | Locationの値・受け渡し | 非空のLocationは任意のフラグメント付きスキーム付き絶対URIとして一般構文を検証する。HTTP/HTTPSには限定しない。空白・不正な%表記等は502。前後空白除去後の値をそのまま使い、URLデコード・パス正規化・DNS照会・宛先への接続確認は行わない |
-| CGI-63 | Location単独の応答 | Location以外の有効なヘッダーがなく本文が空なら、Locationを伴う302へ変換する。空値の省略と重複検査は既存規則に従う |
-| CGI-64 | Locationと文書を伴う応答 | Location・Status・Content-Typeを要求し、対応するStatusは301・302・303・307・308に限定する。指定コードと本文を返し、本文は空でもよい。その他の応答ヘッダーはCGI-69〜72の規則で扱う |
-| CGI-65 | Location応答の不完全な組み合わせ | Locationを含む応答で、Location単独またはLocation・Status・Content-Typeの形式に合わなければ502とする。欠けたヘッダーやStatusを補完しない |
-| CGI-66 | 内部・相対リダイレクトの出力 | /other・other・//example.com/等、スキームのない非空Locationは502とする。サーバー内部で再処理せず、絶対URIへの補完や外部向け302への変換も行わない |
-| CGI-67 | CGI出力のContent-Length数値 | 非空値はASCII数字だけの非負整数として検証する。0・先頭ゼロは受理し、符号・カンマ・内部空白・数値の桁あふれは502とする。宣言値とCGI本文の実長を照合し、不一致も502とする |
-| CGI-68 | HTTP応答のContent-Length生成 | CGIのContent-Lengthを直接コピーせず、Webservが実際に送る本文のバイト数から生成する。本文を送れないステータスはCGI-73に従う |
-| CGI-69 | CGI出力全ヘッダーの重複 | CGI出力のすべてのヘッダーを名前の大小文字を区別せず最大1行とする。同値・空値を含む重複も502とし、結合・先勝ち・後勝ちは実装しない。複数のSet-Cookieも最小構成では対象外とする |
-| CGI-70 | CGI出力の接続用ヘッダー | Connection・Keep-Alive・TE・Upgrade・Proxy-ConnectionとConnectionに列挙されたヘッダーを転送しない。ただしStatus・Content-Type・Location・Content-Lengthが列挙されていれば矛盾として502。WebservがConnection: closeを付ける |
-| CGI-71 | CGI出力のTransfer-Encoding | 非空のTransfer-EncodingをCGIが出したら502とする。CGI出力をchunkedとして復号する処理は実装しない。入力要求のchunked復号は既存方針を維持する |
-| CGI-72 | その他のCGI出力ヘッダー | 専用の処理・除外対象以外は、構文と値の検証を通ったヘッダーを値を保持して転送する。Webserv側で同名ヘッダーを二重に追加しない。エラー本文置換時はCGI-131の除去・再生成を適用する |
-| CGI-73 | 本文を送れないCGI応答 | 204・205・304でCGI本文があれば502。本文が空なら204・304にはHTTPのContent-Lengthを付けず、205にはContent-Length: 0を付ける。CGIの長さ指定があれば先に通常の実長照合を行う |
-| CGI-74 | CGIの1xx応答 | Statusのコードの数値検査は100〜599を維持するが、1xxだけで終了するCGI出力は最終応答にできないため502とする。中間応答と最終応答を複数回扱う仕組みは実装しない |
-| CGI-75 | 入力ヘッダーの転送対象の確定 | 合意済みの名前・除外・重複・空値の規則を満たす要求ヘッダーをHTTP_*へ転送する。Accept等の名前を個別登録する許可一覧は作らない |
-| CGI-76 | Trailer・Expectの除外 | 要求のTrailer・ExpectをCGIへ転送せず、HTTP_TRAILER・HTTP_EXPECTを設定しない。HTTP/1.1のExpectは既存の417でCGIを起動せず、HTTP/1.0では値によらず無視する |
-| CGI-77 | 要求trailerの扱い | chunked本文の後のtrailerはHTTP層で読み取り・構文検査するが、CGIの環境変数へ追加せず、先に届いたヘッダーも上書きしない |
-| CGI-78 | 要求Connectionの検証・重複 | 値をカンマ区切りのヘッダー名として検証し、不正な非空の名前は400、空の要素は無視する。複数行なら全行に列挙された名前をCGI-44のHTTP_*除外対象とする。本文受信・専用環境変数の規則は維持する |
-| CGI-79 | 要求ヘッダー値の共通文字検査 | 要求ヘッダー共通の検査としてHTAB以外の制御文字とDELを400にする。非ASCIIのバイトは変換しない。この検査を本文へ適用しない |
-| CGI-80 | CGI要求のContent-Type検証 | CGIへの要求のContent-Typeは最大1行で、同値・空値を含む重複は400とする。値は専用変数へ渡し、本文の形式やパラメーターの解釈はCGIに任せる。空値はCONTENT_TYPEを空文字列で設定し、ヘッダーなしなら省略する |
-| CGI-81 | 転送除外対象の重複 | CGIへ転送しないという理由だけで、除外対象ヘッダーの重複を一律に400にしない。Host・Content-Length等の個別検証と、Connection・Content-Typeの規則は維持する |
-| CGI-82 | 要求のContent-Encoding | Content-Encodingは既存の転送規則を満たせばHTTP_CONTENT_ENCODINGへ渡す。gzip等の内容符号化をWebserv側で展開せず、CGI本文はchunked等の転送符号化の復号だけを済ませて渡す |
-| CGI-83 | CGI環境へ渡す要求情報のNUL | 環境変数へ渡す要求情報に実NULバイトが残る場合はCGI起動前に400とする。未デコードのクエリの文字列%00はそのまま渡せる。URLパス中の%00を400にする既存規則と、本文をバイト列として渡す方針は維持する |
-| CGI-84 | CGIファイルパスの結合 | Configで解決済みの絶対root/aliasと、C-24・C-25で1回デコード・正規化したURLパスを使う。rootはURI全体を追加し、結合境界で重なる/を1個にする。aliasはlocation prefixを置換し、C-09のprefix・alias値の末尾/必須を維持する |
-| CGI-85 | スクリプトとPATH_INFOの検証範囲 | CGI-25の左からの探索で、設定拡張子に一致する最初の実在する通常ファイルを実行対象とする。以後のPATH_INFOはファイルパスとして存在・権限検査しない |
-| CGI-86 | CGI領域のファイル種別 | statで種別を確認する。ディレクトリはスクリプトとして実行せず、既存のディレクトリ・index処理へ進む。通常ファイルでもディレクトリでもないFIFO等は403とする |
-| CGI-87 | スクリプトの権限検査 | access(path, R_OK)で読み取り可能かを確認する。Pythonが読み込むため、スクリプトのX_OKは要求せず、内容の構文検査・試し実行は行わない |
-| CGI-88 | Pythonの要求時検証 | Config起動時の通常ファイル・X_OK検査(C-40)を維持し、要求ごとのPythonの事前検査は追加しない。実際のexecve失敗は既存の502とする |
-| CGI-89 | ファイル検査後の変化 | 検査後のファイル消失・権限変更等でも再検査・再起動によるリトライは追加しない。起動処理の失敗・Pythonの異常終了は既存のCGIエラー規則に従う。子のchdir等の失敗検出方法は9/10で確定する |
-| CGI-90 | stat/access失敗の分類 | 失敗直後のerrnoでENOENT・ENOTDIRは404、EACCESは403、ENAMETOOLONGは414、その他は500とする。read/write(recv/send)後のerrno禁止と区別する |
-| CGI-91 | CGIの担当境界 | rysatoが要求検証・実行対象とcwdの解決・環境変数内容の生成・出力解析とHTTP応答生成を担当する。tasugiyaが接続情報取得・起動・pollでのパイプI/O・上限と期限・子の終了と回収を担当する |
-| CGI-92 | CGI実行要求の型 | CgiRequestはPython絶対パス・スクリプト絶対パス・cwd・NAME=valueの環境変数一覧・復号済み本文を保持する。プロセス側でHTTP/Configを再解釈せず、argvはPythonとスクリプトの2つから生成する |
-| CGI-93 | 接続情報の受け渡し | ConnectionInfoで接続元IPv4、実際のサーバーIPv4、実際のlistenポートをtasugiyaからrysatoへ渡す。IPv4は4オクテットの十進表記とし、DNSやinet_ntop/inet_ntoaは追加しない |
-| CGI-94 | 実行結果の型 | CgiResultはstdout全体とerrorStatusを保持する。0は実行成功、非0はサーバー側のエラーコード。子の終了状態はtasugiya側で解釈し、失敗時の部分出力をHTTPへ送らない。出力の妥当性はrysato側が別途検証する |
-| CGI-95 | Routerの受け渡しAPI | route(request, config, connection, response, cgi)はRESPONSE_READYまたはCGI_REQUIREDを返し、対応する出力引数だけを有効とする。parseCgiOutput(output, response)は成功0・不正出力502を返し、成功時だけresponseを有効とする |
-| CGI-96 | プロセス起動・結果取得API | start(const CgiRequest&, CgiProcess&)は開始成功0・失敗時はエラーコードを返し、CGI完了を待たない。takeResult(CgiResult&)は未確定false、確定結果を一度だけtrueで返す。所有権はCGI-99〜106、後始末はCGI-107〜118、失敗検出は9/10の現時点の代替案に従う |
-| CGI-97 | 要求ヘッダー全行の公開 | HttpRequest::getHeaders()は小文字名・前後SP/HTAB除去後の値の組を全行保持したvectorへのconst参照を返す。重複を辞書の上書き・結合で失わず、転送対象の検証とConnection全行処理に使う |
-| CGI-98 | CGIのStatus説明文の反映API | HttpResponse::setStatus(int, const std::string&)で検証済みのCGI説明文を空も含め保持する。setStatus(int)はサーバー生成応答の標準文言に使う |
-| CGI-99 | CGI実行要求の寿命 | EventLoopの一時的なCgiRequestをrouteからstartが返るまで保持する。startは親側にrequestの参照・ポインターを残さず、返却後は要求を破棄できる |
-| CGI-100 | CGI本文の所有権 | startが本文をCgiProcessのstringへコピーする。入力全体とsize_tの書き込み位置を持ち、部分書き込みでは位置を進める。書き込み完了・打ち切りで不要になった本文バッファを空stringとのswapで解放する |
-| CGI-101 | argv/envpの管理 | CgiRequestの文字列を先に完成させ、tasugiyaがfork前にPython・script・NULLのargvと、NAME=valueのポインター一覧・末尾NULLのenvpを作る。配列作成後に元の文字列/vectorを変更せず、文字列ごとのnew[]・手動解放を追加しない |
-| CGI-102 | 起動情報の親子での寿命 | 子はfork時のパス・cwd・環境をexecve成功または起動失敗による終了まで保持する。親はstartが返れば一時データを解放でき、CgiProcessに環境変数のコピーを保持しない |
-| CGI-103 | stdoutと結果の所有権 | CgiProcessがstdoutを蓄積し、takeResult成功時にswapでCgiResultへ渡す。失敗時は部分出力を破棄しstdoutDataを空にする。falseなら出力引数を変更せず、trueなら既存内容を置き換え、一度だけ取得できる |
-| CGI-104 | CGI結果とHTTP応答の寿命 | EventLoopがCgiResultをparseCgiOutputの間保持する。HttpResponseは生成したヘッダー・本文を自分の値として保持し、解析後はCgiResultを破棄できる。ヘッダーのconst参照はroute内で環境変数へコピーし、CGI実行中に残さない |
-| CGI-105 | ClientとCGIの所有関係 | EventLoopがClientとCgiProcessを所有する。CgiProcessは対応先Clientへの非所有ポインターを持ち、Client破棄前に関連付けをNULLへ外す。fdだけで返却先を探さず、切断後の結果を解析・送信しない |
-| CGI-106 | CgiProcessのコピー禁止 | C++98のprivateな未定義コピーコンストラクター・代入演算子でコピー不可とし、pid/fdの所有者を増やさない。EventLoopの管理表にはポインターを保持し、CgiProcessがClientを削除する処理は作らない |
-| CGI-107 | 正常終了時の後始末 | 親側stdinパイプは入力完了で閉じる。stdoutはEOFまで読み、子の終了・回収も確認してから結果を返す。子が先に終了しても未読stdoutを捨てず、後始末と結果の引き渡し/破棄後にCgiProcessを削除する |
-| CGI-108 | CGI中止時の後始末 | 切断検出・タイムアウト・上限超過・I/O異常では、最初の中止/失敗理由を保持し、パイプ監視を外して閉じ、未回収の直接の子を必要に応じSIGKILLで停止・回収する。切断後は応答せず、残る接続には回収後に確定済みエラーを返す |
-| CGI-109 | 子の回収とpidの管理 | EventLoopだけがpid>0の直接の子にwaitpid(pid, &status, WNOHANG)を呼ぶ。0なら次のループへ進み、ブロッキング待機・SIGCHLDハンドラー/自動回収は追加しない。回収済みpidをkillせず、停止成功後のkillを繰り返さない |
-| CGI-110 | 回収・closeの失敗処理 | waitpid失敗のEINTRは次のループで再試行、ECHILDは回収対象なしとして以後killせず管理エラー500、その他は500を保持して再確認する。既存の失敗理由を上書きしない。killのESRCHだけで回収済みとしない。Linuxのcloseは保持fdを-1にして一度だけ呼び、再試行しない |
-| CGI-111 | 回収待ちとpoll周期 | CGI実行中・回収待ちは単一EventLoopのpoll待ち時間を最大100 msとし、I/O通知がなくても終了・期限を定期確認する。別pollループやデストラクターでの待機を追加しない |
-| CGI-112 | CGIパイプのイベント処理 | stdoutのPOLLHUPでもpoll後に読んでreadの0をEOFとする。各対象fdに1回ずつI/Oし、残りは次のpollへ戻す。read負・未送信本文へのwriteが0以下・POLLERR/POLLNVAL等は502で打ち切り、read/write後のerrno分岐・再試行はしない |
-| CGI-113 | CGI待機中の受信EOF | 要求完成後のrecvの0だけで完全切断と判断せず、受信EOFを記録してPOLLIN監視を止め、CGIを継続する。POLLHUP/POLLERR・送信失敗等で接続が使えないと分かった時に中止する |
-| CGI-114 | CGI待機中の追加受信 | WAITING_CGI中もクライアントのpoll通知を処理する。POLLIN時の追加データは固定サイズの一時バッファで読み捨て、次の要求として蓄積・解析しない。1接続1要求を維持する |
-| CGI-115 | 古いpoll通知と削除時期 | イベント処理前に管理オブジェクトと現fdの有効性を確認し、閉じたものをスキップする。Client/CgiProcessの削除は現在のpoll結果の処理後まで遅らせ、解放済みオブジェクト・再利用fdを古い通知で操作しない |
-| CGI-116 | CGIのfd継承 | listen・acceptソケットと全CGIパイプに生成時F_SETFD/FD_CLOEXECを設定する。子はstdin/stdoutをdup2で0/1へ接続し元の不要端を閉じ、0/1/2のFD_CLOEXECを解除して標準入出力・stderrを継承する。不要fdはexecve成功時に閉じ、設定失敗は成功扱いにしない |
-| CGI-117 | 親子のシグナル設定と対象 | 親のSIGPIPE無視を維持し、子はexecve前にSIGPIPEをSIG_DFLへ戻す。SIGCHLDをSIG_IGNにしない。管理対象はWebservが直接起動したCGIの子とし、孫プロセス列挙・プロセスグループ管理は追加しない |
-| CGI-118 | SIGINT終了時のCGI回収 | 新規受付・CGI起動を止め、listen/Clientを閉じて関連付けを外し、実行中CGIを打ち切る。同じEventLoopの終了段階で全直接の子を回収してからWebservを終了し、未回収のままループを抜けない |
-| CGI-119 | 使用不可の関数 | ユーザー確認により_exitとclock_gettimeはともに使用不可とする。子の終了・時間計測の方法はこの制約の下で残項目9/10として合意する |
-| CGI-120 | 起動・計時の代替案の位置付け | CGI-121〜127は現時点で採用する代替案とし、実装・実行環境・動作確認の結果によって方法や具体的な処理を見直し得る。動作確認済み・最終固定とは扱わず、変更時は理由・影響・検証結果を関連資料に揃えて記録する。_exit/clock_gettime使用不可の制約は維持する |
-| CGI-121 | 子の起動失敗とmainへの戻り方(現時点の採用案) | 子のSIGPIPE復元・dup2・fd設定/close・chdir・execve等の失敗では、子フラグを用いてmainまでreturnで戻る。isChildProcessを各呼び出し元が最初に確認し、HTTP応答・残りのイベント処理・親用cleanupへ進まない。起動時の一時fdと自動変数を解放し、mainでCGI-123の子専用解放後にreturn 127で終了する |
-| CGI-122 | 起動失敗の親への通知(現時点の採用案) | 親はwaitpidで終了状態を確認し、非0の終了コード・シグナル終了は502とする。既存の504等を上書きしない。Python自身の127も502でよいため、起動失敗専用の通知パイプは追加しない |
-| CGI-123 | return終了時の明示的な解放とバッファ(現時点の採用案) | 子の起動失敗ではEventLoop::cleanupInChild()で子に複製された管理対象fd・Client/CGI/listen管理データを解放し、mainでEventLoopをdeleteしてからreturn 127する。kill/waitpid/shutdown・親用cleanup・応答/ログ処理は実行しない。所有データと一時資源をfork前に追跡可能にし、デストラクターは停止・回収を行わず資源解放だけとする。fork前にC++出力バッファを空にし、子では追加確保・例外脱出・ログ出力を行わない |
-| CGI-124 | 計時の取得元(現時点の採用案) | Linuxの/proc/uptimeの最初の非負小数をopen/read/closeで取得し、有限のdoubleへ変換する。毎回開き直して固定サイズ256バイトで読み、lseek・時刻関数・外部コマンド・追加Config項目を設けない。Linuxで/procが読めることを前提とする |
-| CGI-125 | 10秒の判定(現時点の採用案) | fork直前の取得値を開始値とし、EventLoopの各周1回の現在値を全CGIで共有して差が10.0秒以上なら504とする。途中のI/Oで延長しない。小数2桁の表示精度と最大100 msのpoll待ちに従って検出し、10秒ちょうどの実時間保証とはしない |
-| CGI-126 | 計時失敗(現時点の採用案) | 開始前の取得失敗は500で起動せず、実行中の取得失敗・値の逆行は未完了CGIを500で打ち切る。既存の失敗理由を保持し、取得不能時に無期限で続けるフォールバックは追加しない |
-| CGI-127 | fork前の準備と失敗(現時点の採用案) | 本文コピー・argv/envp・パイプ・親側ノンブロッキング/CLOEXEC設定はfork前に準備する。親側pipe/fork/fcntl失敗は500とし、作成済み資源を後始末する。子が作成済みなら8/10に従い回収する |
-| CGI-128 | 受け渡しの順序 | rysato側のrouteが即時応答を返した場合はCGIを起動しない。tasugiya側のstart失敗はそのコードでmakeErrorを生成する。非同期のCgiResultはerrorStatusが非0なら部分stdoutを解析せずmakeErrorへ渡す。0ならrysato側のparseCgiOutputで全出力を検証し、解析失敗は502、成功はCGIの応答として扱う。失敗時のresponse出力引数は使用しない。 |
-| CGI-129 | 失敗コード | スクリプト未発見404・読み取り不可403・パス長414等の既存分類を維持する。親側のpipe/fork/fcntl・計時・管理の失敗は500、子側の準備/exec失敗・非0終了/シグナル終了・パイプI/O失敗・出力上限超過・不正出力は502、10秒経過は504。複数の原因が発生しても最初に確定したコードを維持する。正常に返されたStatus: 404等はCgiResultの実行失敗ではない。 |
-| CGI-130 | error_pageの適用 | 出力検証後の最終コードが400〜599なら、CGIが正常に返したエラーも含め、指定ファイルの本文へ置き換える。未指定・読み取り失敗なら内蔵HTMLにする。元のコードを維持し、有効なCGIのStatus説明文は空文字列も保持する。200〜399には適用しない。1xxは既決定のCGI-74により先に502となる。不正出力をerror_pageで覆って元のCGIコードのまま受理しない。 |
-| CGI-131 | 置換する本文とヘッダー | エラーページはHTMLとして扱い、Content-Typeはtext/html、Content-Lengthは置換後のバイト数で生成する。元本文の情報を残さないため、CGI由来のContent-*、ETag、Last-Modified、Digest、Repr-Digestを大小文字を区別せず除去する。この一律除去は最小構成のチーム方針。その他の既存転送対象ヘッダー(Allow、WWW-Authenticate、Set-Cookie等)は保持する。200〜399の応答にはこの除去を行わない。 |
-| CGI-132 | エラーページの読み取り | 設定済みのファイルパスをそのまま使い、実行時に通常ファイルであることを確認して読む。空ファイルも読み取り成功なら空本文として採用する。失敗時は元コードの内蔵HTMLへ一度だけフォールバックし、再ルーティング・CGI実行・再帰的なエラー生成を行わない。CGIの8 MiB制限は元のstdoutに適用し、エラーページに新しいCGI専用上限は追加しない。 |
-| CGI-133 | 内部の共通処理 | HttpResponseにvoid applyErrorPage(const ServerConfig& conf)を追加し、400〜599の場合だけ上記の本文置換を行う。makeErrorは同じ処理を内部で利用する。EventLoopはparseCgiOutputが成功した応答に一度だけapplyErrorPageを呼び、makeErrorの結果には再適用しない。ファイル読み取りと内蔵HTMLへのフォールバックをCGI専用に重複実装しない。 |
-| CGI-134 | 応答を返せない場合 | クライアント切断時は停止・回収だけを行い、応答を生成しない。送信失敗後に別のエラー応答を追加送信しない。listen側のCLOEXEC設定失敗は起動失敗、acceptしたfdの設定失敗はその接続を閉じて監視へ登録しない。CGIパイプの設定失敗は上記の親500/子502の分類を使う。 |
-| CGI-135 | 結合の完了条件 | 04のCGI受入項目を実装後に満たすことを条件とする。正常なGET/POST・chunked入力、入出力の並行処理、出力検証・エラーコード・上限・期限、切断/半閉鎖/SIGINT、fd継承・子の回収・寿命、CGI実行中の静的配信を確認する。加えて正常なCGIの404/599の置換、200の非置換、エラーページ未指定/読取失敗/空ファイル、元本文の符号化等の除去とAllow等の保持、不正な404出力が502になることを確認する。9/10の代替案は実環境で検証し、必要なら方法を見直す。10項目の合意完了と、未実装の結合試験合格は別に扱う。 |
-
-HTTP要求のリクエスト行8 KiB・ヘッダー合計32 KiB(C-32、超過414/431)と、CGI出力ヘッダー8 KiB・stdout全体8 MiB(CGI-20、超過502)は別の上限である。入力ボディは既存のclient_max_body_sizeで制限する。
-
-HTTPリクエスト行・HTTPヘッダーの改行はCRLF限定(C-31)。CGI-15のLF受理はCGI出力に限る。HTTPボディの改行はデータとして保持する。HTTP要求ヘッダーの折り返し拒否と前後SP/HTAB除去(C-33)もボディには適用せず、CGI出力の検証規則とは区別する。HTTP要求ヘッダー名のtoken検証・ASCII小文字保持(C-34)もCGI出力の受付やHTTP_*への変換規則を新たに確定するものではない。
-要求のContent-Lengthは同値でも重複・カンマ入りを400にする(C-35)。これはCGI出力のContent-Length検証を確定するものではなく、CGI出力側の数値・桁あふれ・重複はCGI-67・69で確定済み。
-長さ指定が両方ないPOSTも空ボディで受信完了する(C-36)。CGIへ進む場合はstdinに書き込まず、親側の書き込みパイプを閉じてEOFを渡す。CONTENT_LENGTHはCGI-31に従い空文字列で設定する。環境変数の細則はC12のCGI-27〜50・75〜83に従う。
-
-CGI-03の「加工せず」は、HTTPのchunked復号後のボディをそのまま渡すという意味。CGIへの受け渡しのためにフォームの `name=value` 分解、URLデコード、multipartの分解をWebserv側で行わない。通常のアップロード機能(C6)の形式・保存処理は別途決める。
-
-CGI-01は対応言語をPythonに限定する合意。Configで受理する拡張子の文法と1組限定はC-19、拡張子とインタプリタの文字列2つによる保持はC-42で確定済み。[Config合意事項](05_config_agreement.md)を参照する。
-
-CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` とする。RFC 3875 §4.4にあるindexed queryの引数展開を省く設計判断であり、課題PDFにこの展開機能が個別に指定されているわけではない。CGI-24も出力の検査を省く意味ではない。課題PDFは不正なCGI出力の補正を明記しておらず、最小構成では不正と判定した時点で502にする。RFC §6.3が重複を禁じるContent-Type・Location・Statusと、その他の応答ヘッダーは区別して検証規則を決める。
+[CGI-01〜135の決定表](../Requirements.md#cgi-decisions) を参照する。CGI-120〜127は現時点で採用する代替案であり、実装・実行環境・動作確認の結果で見直し得る。子の起動失敗時に所有メモリを明示的に解放し、親用の停止・回収処理を実行しない方針は合意済み。具体的な経路は項目9/10で説明する。
 
 ### 環境変数の合意済みの規則
 
-下記11変数の値と設定・省略の規則は合意済み。CGI用環境はCGI-50に従い、これらと転送対象のHTTP_*だけから構築し、親の環境変数はコピーしない。SERVER_SOFTWAREはCGI-38で対象外とし、CGIへ渡す環境変数に含めない。HTTP_*の名前・値の変換はCGI-39、Content-Type・Content-LengthのHTTP_*からの除外はCGI-40、Transfer-Encodingの除外はCGI-41、Connection自体の除外はCGI-42、その他4つの通信制御用ヘッダーの除外はCGI-43、Connectionに列挙されたヘッダーの除外はCGI-44、Proxyの除外はCGI-45、認証用ヘッダーの除外はCGI-46、転送する名前の文字範囲はCGI-47、転送対象の同名ヘッダーの重複拒否はCGI-48、HTTP_*の空値省略はCGI-49で確定済み。入力ヘッダーの残る規則はCGI-75〜83で確定済み。環境変数の受け渡しAPIは引き続き別途確定する。
+下記11変数の値と設定・省略の規則は合意済み。CGI用環境はCGI-50に従い、これらと転送対象のHTTP_*だけから構築し、親の環境変数はコピーしない。SERVER_SOFTWAREはCGI-38で対象外とし、CGIへ渡す環境変数に含めない。HTTP_*の名前・値の変換はCGI-39、Content-Type・Content-LengthのHTTP_*からの除外はCGI-40、Transfer-Encodingの除外はCGI-41、Connection自体の除外はCGI-42、その他4つの通信制御用ヘッダーの除外はCGI-43、Connectionに列挙されたヘッダーの除外はCGI-44、Proxyの除外はCGI-45、認証用ヘッダーの除外はCGI-46、転送する名前の文字範囲はCGI-47、転送対象の同名ヘッダーの重複拒否はCGI-48、HTTP_*の空値省略はCGI-49で確定済み。入力ヘッダーの残る規則はCGI-75〜83で確定済み。環境変数の受け渡しAPIはCGI-91〜98、所有権・寿命はCGI-99〜106で合意済み。
 
 | 変数 | 値の出所 | 空値/省略 | 合意ID |
 |---|---|---|---|
@@ -309,7 +139,7 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 | SCRIPT_NAME | デコード・正規化後のスクリプトを示すURLパス。PATH_INFO・クエリ・ディスク上のパスは含めない。index経由ではURL上のディレクトリパスに選ばれたindexのファイル名を付ける | 必ず設定する。この対応範囲ではスクリプトを示す先頭`/`のパスとなり、空文字列・省略にはしない | CGI-30 |
 | CONTENT_LENGTH | CGIへ渡す復号後の本文の実際のバイト数。1バイト以上なら10進数の文字列 | 必ず設定する。0バイトなら空文字列とし、省略しない。長さ指定なし・Content-Length: 0・空のchunked本文も同じ扱い | CGI-31 |
 | CONTENT_TYPE | 要求のContent-Typeヘッダーの値。C-33による前後SP/HTAB除去後の値を、boundary等のパラメーターも含めて渡す | ヘッダーがあれば本文0バイトでも設定する。ヘッダーがなければ省略し、推測・既定値の補完はしない | CGI-32 |
-| SERVER_PROTOCOL | 解析済みの要求バージョン。HTTP/1.0要求なら`HTTP/1.0`、HTTP/1.1要求なら`HTTP/1.1`。応答側の固定値で上書きしない | 必ず設定する。空文字列・省略にはしない | CGI-33 |
+| SERVER_PROTOCOL | 解析済みの要求バージョン。HTTP/1.0要求なら`HTTP/1.0`、HTTP/1.1要求なら`HTTP/1.1`。HTTP/1.2〜1.9も受信表記を保持する(HTTP-04)。応答側の固定値で上書きしない | 必ず設定する。空文字列・省略にはしない | CGI-33 |
 | GATEWAY_INTERFACE | 固定文字列`CGI/1.1`。要求のHTTPバージョンによって変えない | 必ず設定する。空文字列・省略にはしない | CGI-34 |
 | SERVER_PORT | その接続を受け付けたlistenのポート番号を10進数の文字列で渡す | 必ず設定する。80等の標準ポートでも省略せず、空文字列にはしない | CGI-35 |
 | REMOTE_ADDR | acceptで取得した接続元のIPv4アドレスをドット区切りの10進数で渡す。ポート番号は含めず、逆引きDNSや転送ヘッダーによる上書きを行わない | 必ず設定する。空文字列・省略にはしない | CGI-36 |
@@ -333,13 +163,13 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 
 [RFC 3875 §4.1.15](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.15)は要求を受信したTCPポート番号の設定を必須とし、標準ポートでも省略しないことを要求している。チームではその接続を受け付けたlistenの既存ポート番号を使い、8080で受け付けた場合は`8080`、80で受け付けた場合は`80`を設定する。追加のConfig項目は設けない。
 
-[RFC 3875 §4.1.8](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.8)は要求を送ったクライアントのネットワークアドレスの設定を必須としている。チームではIPv4の接続元を使い、ローカル接続なら`127.0.0.1`等を渡す。値は接続情報から取得し、X-Forwarded-For等を参照しない。この決定はREMOTE_ADDRの値の出所と形式についてであり、HTTP_*として渡すヘッダーの範囲を新たに確定するものではない。アドレスの文字列化手段と受け渡しAPIは、課題の許可関数に従って別途確定する。
+[RFC 3875 §4.1.8](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.8)は要求を送ったクライアントのネットワークアドレスの設定を必須としている。チームではIPv4の接続元を使い、ローカル接続なら`127.0.0.1`等を渡す。値は接続情報から取得し、X-Forwarded-For等を参照しない。この決定はREMOTE_ADDRの値の出所と形式についてであり、HTTP_*として渡すヘッダーの範囲を新たに確定するものではない。4オクテットの十進表記とConnectionInfoによる受け渡しはCGI-93で合意済み。
 
-[RFC 3875 §4.1.14](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.14)は要求先のホスト名またはネットワークアドレスを必ず設定することを要求している。チームでは`Host: localhost:8080`なら`localhost`、`Host: example.com`なら`example.com`を渡す。HTTP/1.0でHostがない場合の接続情報は、末尾/補完のリダイレクトで確定したC-28と共通にできる。listenのワイルドカード値`0.0.0.0`ではなく、接続先の実際のサーバー側IPを使う。Hostの受付検証はC-28・C-30に従い、HTTP/1.1のHost欠落は従来どおり400とする。DNS照会・server_name設定・Hostによる仮想ホスト選択は追加しない。接続情報の取得失敗時の扱いと受け渡しAPIは引き続き別途確定する。
+[RFC 3875 §4.1.14](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.14)は要求先のホスト名またはネットワークアドレスを必ず設定することを要求している。チームでは`Host: localhost:8080`なら`localhost`、`Host: example.com`なら`example.com`を渡す。HTTP/1.0でHostがない場合の接続情報は、末尾/補完のリダイレクトで確定したC-28と共通にできる。listenのワイルドカード値`0.0.0.0`ではなく、接続先の実際のサーバー側IPを使う。Hostの受付検証はC-28・C-30に従い、HTTP/1.1のHost欠落は従来どおり400とする。DNS照会・server_name設定・Hostによる仮想ホスト選択は追加しない。受け渡しAPIはCGI-93のConnectionInfoで合意済み。接続情報取得失敗時の扱いは、残るHTTP/ネットワーク境界の設計で明確にする。
 
 **確定(CGI-38)**: 最小構成ではSERVER_SOFTWAREを省略し、固定のサーバー名・バージョンをCGIへ渡す処理は実装しない。課題PDFはこの変数を個別に列挙していない。[RFC 3875 §4.1.17](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.17)では必須だが、チームではRFC全体への準拠を目標とせず、この項目を対応範囲から外す。
 
-**確定(CGI-39)**: 転送対象の要求ヘッダー名をASCII大文字に変換し、`-`を`_`に置き換えて先頭に`HTTP_`を付ける。`User-Agent: curl/8.0`なら`HTTP_USER_AGENT=curl/8.0`、`X-Test: AbC`なら`HTTP_X_TEST=AbC`となる。値はC-33の前後SP/HTAB除去後のものを使い、大小文字を保持する。[RFC 3875 §4.1.18](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.18)がこの名前の変換規則を定めている。この合意だけで全要求ヘッダーの転送を決めるものではなく、転送対象・除外・重複・異なる名前が同じ環境変数名になる場合の扱いは引き続き別途確定する。
+**確定(CGI-39)**: 転送対象の要求ヘッダー名をASCII大文字に変換し、`-`を`_`に置き換えて先頭に`HTTP_`を付ける。`User-Agent: curl/8.0`なら`HTTP_USER_AGENT=curl/8.0`、`X-Test: AbC`なら`HTTP_X_TEST=AbC`となる。値はC-33の前後SP/HTAB除去後のものを使い、大小文字を保持する。[RFC 3875 §4.1.18](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.18)がこの名前の変換規則を定めている。この合意だけで全要求ヘッダーの転送を決めるものではなく、転送対象・除外・重複はCGI-40〜49・75〜83に従う。名前をASCII英数字と-に限定するCGI-47により、変換後の名前の衝突を避ける。
 
 **確定(CGI-40)**: Content-TypeとContent-Lengthは専用変数のCONTENT_TYPE・CONTENT_LENGTHで渡し、HTTP_CONTENT_TYPE・HTTP_CONTENT_LENGTHは設定しない。[RFC 3875 §4.1.18](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1.18)は、専用変数で利用できるヘッダーをHTTP_*から除外することを推奨している。本文長は要求ヘッダーの値ではなく、CGI-31に従って復号後の本文から生成する。CONTENT_TYPEのヘッダーなし時の省略はCGI-32を維持する。
 
@@ -361,15 +191,15 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 
 **確定(CGI-49)**: 転送対象ヘッダーの前後SP/HTABを除去した値が空なら、対応するHTTP_*は省略する。`X-Test:`、空白だけの`X-Test:   `、X-Testがない場合はいずれもHTTP_X_TESTを設定しない。空文字列の変数を生成する処理は設けない。[RFC 3875 §4.1](https://www.rfc-editor.org/rfc/rfc3875.html#section-4.1)は空値と省略を区別せず、任意のメタ変数が空なら省略してよいとしている。対象はHTTP層の検証を通ったヘッダーであり、Host等の個別検証は維持する。空値もヘッダーの行としては存在するため、転送対象の同名ヘッダーが複数行あればCGI-48の重複拒否を適用してから空値の省略を判断する。
 
-**確定(CGI-50)**: `execve`へ渡す`envp`は、合意済みの11種類の環境変数と転送対象のHTTP_*だけから構築する。CONTENT_TYPE等の省略規則も維持し、常に11個すべてを設定する意味ではない。親プロセスの環境をコピーしないため、起動元のPATH・HOME・PYTHONPATH・HTTP_PROXY等は渡さず、親にREQUEST_METHOD等があっても要求から生成した値を使う。PythonとスクリプトはCGI-26の絶対パスで指定するため、起動対象の検索用PATHは追加しない。環境変数を追加・上書きするConfig項目も設けない。[Linux execve(2)](https://man7.org/linux/man-pages/man2/execve.2.html)では、envpで新しいプログラムに渡す環境を指定できる。課題PDFは要求情報をCGIから利用できることを求めるが、親の環境の継承方法は指定しておらず、本決定は最小構成のためのチーム方針である。envpの組み立て・寿命・所有権と担当境界は別途確定する。
+**確定(CGI-50)**: `execve`へ渡す`envp`は、合意済みの11種類の環境変数と転送対象のHTTP_*だけから構築する。CONTENT_TYPE等の省略規則も維持し、常に11個すべてを設定する意味ではない。親プロセスの環境をコピーしないため、起動元のPATH・HOME・PYTHONPATH・HTTP_PROXY等は渡さず、親にREQUEST_METHOD等があっても要求から生成した値を使う。PythonとスクリプトはCGI-26の絶対パスで指定するため、起動対象の検索用PATHは追加しない。環境変数を追加・上書きするConfig項目も設けない。[Linux execve(2)](https://man7.org/linux/man-pages/man2/execve.2.html)では、envpで新しいプログラムに渡す環境を指定できる。課題PDFは要求情報をCGIから利用できることを求めるが、親の環境の継承方法は指定しておらず、本決定は最小構成のためのチーム方針である。envpの組み立て・寿命・所有権はCGI-99〜106、担当境界はCGI-91〜98で合意済み。
 
-**確定(CGI-75〜83、残項目4/10)**: 要求ヘッダーのCGIへの受け渡しを次の規則で確定する。
+**確定(CGI-75〜83、項目4/10)**: 要求ヘッダーのCGIへの受け渡しを次の規則で確定する。
 
 - CGI-39〜49の名前・除外・重複・空値の規則を満たす要求ヘッダーを転送し、Accept等の個別の許可一覧は作らない。例えばHostはHTTP_HOSTへポート付きの値を渡し、SERVER_NAMEのホスト部分のみの規則とは区別する。
 - Trailer・ExpectもHTTP_*から除外する。本文後のtrailerはHTTP層で読み取り・構文検査し、環境変数に追加しない。初期ヘッダーを上書きしない。HTTP/1.1のExpectは既存の417でCGIを起動せず、HTTP/1.0では値によらず無視する。
-- 要求Connectionの値は、各行をカンマで区切り、要素の前後SP/HTABを除去してヘッダー名のtokenとして検証する。不正な非空要素は400、空要素は無視する。複数行の場合は全行の名前を除外対象に加える。CGI-44の専用変数・本文受信を変更しない方針を維持する。
+- 要求Connectionの値はHTTP-10により通常要求でも同じ検証を行う。各行をカンマで区切り、要素の前後SP/HTABを除去してヘッダー名のtokenとして検証する。不正な非空要素は400、空要素は無視する。複数行の場合は全行の名前を除外対象に加える。CGI-44の専用変数・本文受信を変更しない方針を維持する。
 - 要求ヘッダーの共通の値の文字検査として、HTAB以外の制御文字(0x00〜0x1F)とDEL(0x7F)を400にする。0x80〜0xFFは変換せず保持する。転送から除外するヘッダーもこの共通検査を受ける。ボディには適用しない。
-- CGIへの要求のContent-Typeは最大1行とし、同値・空値を含む重複は400とする。単一の値は前後SP/HTAB除去後にCONTENT_TYPEへ渡す。空ならCONTENT_TYPEを空文字列で設定し、ヘッダーなしなら省略する。本文の形式やパラメーターの解釈はCGIへ任せ、入力のメディアタイプの構文・登録一覧の照合をCGIへの受け渡しのために追加しない。通常のアップロード側の検証は別の既存仕様に従う。
+- HTTP-07によりContent-Typeの最大1行を全要求へ適用する。CGIへの要求でも同値・空値を含む重複は400とする。単一の値は前後SP/HTAB除去後にCONTENT_TYPEへ渡す。空ならCONTENT_TYPEを空文字列で設定し、ヘッダーなしなら省略する。本文の形式やパラメーターの解釈はCGIへ任せ、入力のメディアタイプの構文・登録一覧の照合をCGIへの受け渡しのために追加しない。通常のアップロード側の検証は別の既存仕様に従う。
 - 転送除外対象の重複を一律に拒否する分岐は追加しない。Host・Content-Length等の個別検証、Connectionの全行処理とCGI要求のContent-Typeの重複拒否は維持する。
 - 要求のContent-Encodingは転送規則を満たせばHTTP_CONTENT_ENCODINGへ渡す。Webservがgzip等を展開する機能は追加せず、chunked等の転送符号化の復号だけを済ませた本文を渡す。
 - CGI環境変数に渡す要求情報に実NULバイトが残れば起動前に400とし、C文字列として値が途中で切れることを防ぐ。クエリの文字列%00は未デコードのまま渡せる。URLパスの%00を400とするC-24と、本文を加工しないCGI-03は維持する。
@@ -378,7 +208,7 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 
 ### CGIのファイル・パス検証の合意済みの動作
 
-**確定(CGI-84〜90、残項目5/10)**: 実行するスクリプトまでを検証し、PATH_INFOに対応するファイルを探す処理は追加しない。
+**確定(CGI-84〜90、項目5/10)**: 実行するスクリプトまでを検証し、PATH_INFOに対応するファイルを探す処理は追加しない。
 
 - rootは正規化済みURI全体を追加し、root末尾とURI先頭で重なるスラッシュを1個にする。aliasはlocation prefixを置換する。aliasのprefixと値の末尾スラッシュ必須、Config相対パスの設定ファイル基準、URLの1回だけのデコード・正規化は維持する。追加のファイル名文字制限やsymlink検出は設けず、C-26の運用前提を維持する。
 - 例えばrootが`/srv/www`の`/cgi/test.py/extra`では、`/srv/www/cgi/test.py`が設定拡張子の最初の通常ファイルならこれを実行し、`/extra`はPATH_INFOとして渡す。`/srv/www/cgi/test.py/extra`の存在・権限は検査しない。スクリプトのディレクトリをcwdとするCGI-26も維持する。
@@ -398,7 +228,7 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 
 **確定(CGI-55)**: CGI出力のヘッダー名は空でないASCIIのtokenとして検証し、不正なら502にする。英数字とtokenで認められた記号を受理するため、`X-Test`と`X_Test`は名前の検査を通るが、`X Test`、空の名前、制御文字・非ASCII文字等を含む名前は拒否する。名前を補正する処理は追加しない。[RFC 3875 §6.3](https://www.rfc-editor.org/rfc/rfc3875.html#section-6.3)はfield-nameをtokenと定義し、[§2.2](https://www.rfc-editor.org/rfc/rfc3875.html#section-2.2)が文字範囲を規定している。課題PDFの個別指定ではなく、公式リファレンスに沿う検証規則である。C-34のHTTP要求ヘッダー名と同じ文字判定を利用できる。CGI-47の要求ヘッダーをHTTP_*へ転送する文字範囲とは適用箇所が異なり、転送規則やその他の出力ヘッダーの採否は変更しない。
 
-**確定(CGI-56〜61、残項目1/10)**: 出力の基本構文・値・Content-Type・Statusを次の規則で検証する。
+**確定(CGI-56〜61、項目1/10)**: 出力の基本構文・値・Content-Type・Statusを次の規則で検証する。
 
 - 各ヘッダー行を最初のコロンで分ける。コロンがない行や、ヘッダー終端の空行がないままEOFになった出力は502とする。行ごとにLF/CRLFを受理し、混在も許容する。単独CRは拒否する。ヘッダー終端後の本文にはこれらの判定を適用しない。
 - 値の前後SP/HTABだけを除去し、内部の空白・タブと大小文字を保持する。HTAB以外の制御文字(0x00〜0x1F)とDEL(0x7F)は502とする。0x80〜0xFFは変換せず保持し、ヘッダーごとの追加の構文検証を行う。空値は省略と同じ扱いとし、重複検査は空値の省略より先に行う。
@@ -409,7 +239,7 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 
 ### Location・リダイレクトの合意済みの動作
 
-**確定(CGI-62〜66、残項目2/10)**: Locationがある応答は、本構成では次のリダイレクトの形式として扱う。
+**確定(CGI-62〜66、項目2/10)**: Locationがある応答は、本構成では次のリダイレクトの形式として扱う。
 
 - 前後SP/HTAB除去後の非空Locationは、スキーム付きの絶対URIと任意のフラグメントとして一般構文を検証する。スキームはHTTP/HTTPSに限定せず、[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html)の一般URI構文を基準とする。空白・不正な%表記等は502とする。値をデコード・パス正規化せず、DNS照会や宛先への接続確認も行わない。重複・空値はCGI-52・59の規則を維持する。
 - 有効なLocationだけがあり、本文が空なら302へ変換する。例えば`Location: https://example.com/next`と終端空行だけの出力は、この形式となる。サーバー独自のCGI拡張ヘッダーは定義しないため、Location単独の形式に追加の有効なCGI出力ヘッダーを認める合意ではない。
@@ -421,7 +251,7 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 
 ### HTTP応答への変換の合意済みの動作
 
-**確定(CGI-67〜74、残項目3/10)**: CGIの出力を検証してから、WebservがHTTP応答を組み立てる。
+**確定(CGI-67〜74、項目3/10)**: CGIの出力を検証してから、WebservがHTTP応答を組み立てる。
 
 - 非空のContent-LengthはASCII数字だけの非負整数として検証し、0・先頭ゼロを受理する。符号・カンマ・内部空白・桁あふれは502。CGI本文の実長と比較し、不一致も502とする。CGIからの宣言値はHTTPへ直接コピーせず、実際に送るHTTP本文の長さをWebservが生成する。
 - すべての出力ヘッダーは、名前のASCII大小文字を区別せず最大1行とする。同値や空値の重複も、空値省略・転送除外より先に拒否する。複数のSet-Cookieを受理・結合する特例も設けない。これでCGI-52の3種類以外の重複規則も確定した。
@@ -441,13 +271,13 @@ CGI-23では `/cgi/test.py?a+b` 自体を拒否せず、QUERY_STRINGを `a+b` �
 
 **確定(CGI-26)**: CGIの子プロセスで、実行するスクリプトが置かれたディレクトリへchdirしてからPythonを起動する。Pythonとスクリプトはともに絶対パスで指定する。例えばスクリプトが`/srv/cgi/tools/test.py`ならcwdは`/srv/cgi/tools`とし、Pythonの`open("data.txt")`は`/srv/cgi/tools/data.txt`を参照する。PATH_INFOはcwdの決定に使わず、cwdを指定するConfig項目も追加しない。
 
-課題PDFは相対ファイルアクセスのために正しいディレクトリでCGIを実行することを要求し、[RFC 3875 §7.2](https://www.rfc-editor.org/rfc/rfc3875.html#section-7.2)もUNIXでスクリプトの置かれたディレクトリをcwdにすることを推奨している。実行パス・cwdの受け渡しAPIと担当境界、chdir失敗時の検出・終了方法は引き続き別途確定する。
+課題PDFは相対ファイルアクセスのために正しいディレクトリでCGIを実行することを要求し、[RFC 3875 §7.2](https://www.rfc-editor.org/rfc/rfc3875.html#section-7.2)もUNIXでスクリプトの置かれたディレクトリをcwdにすることを推奨している。実行パス・cwdの受け渡しAPIと担当境界はCGI-91〜98で合意済み。chdir失敗時の検出・終了はCGI-120〜127の現時点の採用案に従う。
 
 ### 後続パスの合意済みの動作
 
 **確定(CGI-25)**: C-24・C-25に従ってデコード・正規化し、locationを選択した後、そのlocationのroot/aliasで対応するパスを先頭から辿る。設定拡張子で終わる実在する通常ファイルに最初に到達したところをスクリプトとし、それより後ろをPATH_INFOとして渡す。例えばtest.pyが通常ファイルなら、`/cgi/test.py/extra/a.py`でも実行対象はtest.py、PATH_INFOは`/extra/a.py`となる。tools.pyがディレクトリなら、名前の末尾が.pyでも実行せず、その配下のパスを辿る。後続部分はファイルとして探索しない。設定されたindexにもCGI-10の判定を適用する。
 
-この特定手順はチームの採用仕様。RFC 3875 §3.2–3.3はパスをスクリプトと後続部分に分ける考え方を示し、具体的な対応付けはサーバーの設定・実装に委ねている。実行パス・cwdの動作はCGI-26で確定済み。PATH_INFOがない場合の空値/省略はCGI-29で確定済み。アクセス失敗の細則は引き続き別途確定する。
+この特定手順はチームの採用仕様。RFC 3875 §3.2–3.3はパスをスクリプトと後続部分に分ける考え方を示し、具体的な対応付けはサーバーの設定・実装に委ねている。実行パス・cwdの動作はCGI-26で確定済み。PATH_INFOがない場合の空値/省略はCGI-29で確定済み。アクセス失敗の分類はCGI-84〜90に従う。
 
 次の例では、CGIを有効にしたlocationで `.py` を設定し、対応する `test.py` が実在する通常ファイルであることを前提とする。
 
@@ -511,9 +341,9 @@ CGI-17で生成するContent-Lengthは、通常の本文付き応答について
 - 既決定: HTTP/1.0で応答し、1接続1要求、`Connection: close`。本文とContent-Lengthの可否は204等のステータスに応じて既存のHTTP規則を使う。
 - Configの既決定: `root` / `alias` の意味と、設定中の相対パスを設定ファイルのディレクトリ基準で解決する規則は維持する。CGI実行時の作業ディレクトリとは区別する。
 
-### 残る決定の進め方(10項目)
+### CGIの合意状況(10項目)
 
-細かな決定を10件ずつ提示する方式ではなく、残る全体を以下の10項目にまとめ、1項目ずつ合意する。既存CGI-IDは詳細の記録に使い、進捗はこの10項目で管理する。
+CGIの残件を10項目にまとめて1項目ずつ合意した記録。全項目の合意は完了している。CGI-IDは決定の参照に使い、実装・検証の進捗は04で管理する。
 
 | 順番 | 状態 | 決める範囲 |
 |---|---|---|
@@ -528,9 +358,11 @@ CGI-17で生成するContent-Lengthは、通常の本文付き応答について
 | 9/10 | 現時点の採用案・検証後に見直し可 | 子の起動失敗の検出・終了方法と時間計測(CGI-119〜127) |
 | 10/10 | 確定 | エラーの受け渡しと結合時の完了条件(CGI-128〜135) |
 
-### 担当境界と受け渡しAPIの合意事項(残項目6/10)
+<a id="cgi-api"></a>
 
-**確定(CGI-91〜98、残項目6/10)**: 以下の担当境界・型・APIで受け渡す。課題PDFとRFCはCGIへの入力・出力を定めるが、Webserv内部のクラス名・担当・APIは指定しない。
+### 担当境界と受け渡しAPIの合意事項(項目6/10)
+
+**確定(CGI-91〜98、項目6/10)**: 以下の担当境界・型・APIで受け渡す。課題PDFとRFCはCGIへの入力・出力を定めるが、Webserv内部のクラス名・担当・APIは指定しない。
 
 | 担当 | 処理 |
 |---|---|
@@ -586,13 +418,13 @@ int Router::parseCgiOutput(const std::string& output, HttpResponse& response);
 
 HttpResponseには`void setStatus(int code, const std::string& reason)`を追加し、CGIの検証済み説明文(空も含む)をそのままステータス行に反映する。既存の`setStatus(int)`はサーバーが生成する応答の標準文言に使う。CGIの出力検証規則を変更する合意ではない。
 
-CgiRequest/CgiResultの所有権・コピー/参照・envpへの変換と寿命は7/10のCGI-99〜106で確定済み。起動時の具体的な失敗検出は9/10に従う。この合意はCGIの受け渡しに必要な公開部分を定める。HTTP全体の残るAPI・内部実装は別途扱う。
+CgiRequest/CgiResultの所有権・コピー/参照・envpへの変換と寿命は7/10のCGI-99〜106で確定済み。起動時の具体的な失敗検出は9/10に従う。この合意はCGIの受け渡しに必要な公開部分を定める。HTTP全体の責務・公開API・保持はHTTP-59〜64で合意済みで、[Requirements](../Requirements.md#http-api)を参照する。I/O・全体メモリはHTTP-65〜74で合意済み(採用案を含む)。正本は [Requirementsのネットワーク境界](../Requirements.md#http-network-boundary)。
 
 根拠: [RFC 3875 §3.1](https://www.rfc-editor.org/rfc/rfc3875.html#section-3.1)のサーバーの責任、[§4](https://www.rfc-editor.org/rfc/rfc3875.html#section-4)の入力、[§6.1](https://www.rfc-editor.org/rfc/rfc3875.html#section-6.1)の出力処理、および[Linux execve(2)](https://man7.org/linux/man-pages/man2/execve.2.html)のargv/envpを踏まえた担当・APIのチーム合意。
 
-### データ・環境変数の所有権と寿命の合意事項(残項目7/10)
+### データ・環境変数の所有権と寿命の合意事項(項目7/10)
 
-**確定(CGI-99〜106、残項目7/10)**: 6/10のAPIを維持して以下の所有権・寿命で管理する。課題PDFは接続・メモリの後始末を要求するが、内部データをコピーするか参照するかは指定していない。
+**確定(CGI-99〜106、項目7/10)**: 6/10のAPIを維持して以下の所有権・寿命で管理する。課題PDFは接続・メモリの後始末を要求するが、内部データをコピーするか参照するかは指定していない。
 
 | データ・資源 | 所有者と保持期間 |
 |---|---|
@@ -613,9 +445,9 @@ getHeadersのconst参照はHttpRequestが存在し、ヘッダーを変更しな
 
 takeResultはfalseなら出力引数を変更せず、trueなら以前の内容を置き換える。成功時のstdoutバッファはswapで引き渡し、同じ結果の2回目の取得はfalseとする。関連先Clientが消えた実行は後始末を完了して結果を破棄し、HTTP出力の解析・送信へ進まない。打ち切り・回収の具体的な手順は8/10のCGI-107〜118に従う。
 
-### 切断・終了時の後始末とfd継承の合意事項(残項目8/10)
+### 切断・終了時の後始末とfd継承の合意事項(項目8/10)
 
-**確定(CGI-107〜118、残項目8/10)**: 7/10の所有関係を維持して以下の後始末を行う。課題PDFのノンブロッキング・クライアント切断処理・単一poll・要求を無期限に待たせない要件に従う。SIGKILLの選択、回収方法、fdの継承防止方法はチーム方針である。
+**確定(CGI-107〜118、項目8/10)**: 7/10の所有関係を維持して以下の後始末を行う。課題PDFのノンブロッキング・クライアント切断処理・単一poll・要求を無期限に待たせない要件に従う。SIGKILLの選択、回収方法、fdの継承防止方法はチーム方針である。
 
 | 状況 | 方針 |
 |---|---|
@@ -649,11 +481,11 @@ listenソケット・acceptしたソケット・全CGIパイプに、生成時�
 
 このF_SETFDはLinux前提の方針。課題のfcntlの追加制限は「For MacOS only」の節であり、Linuxでの本方針に適用しない。起動時・accept時・CGI起動時の設定失敗は成功扱いにせず、作成済み資源を後始末する。失敗のコードはCGI-129・134に従う。全fdの一覧をstartへ渡す追加APIや/proc走査は設けない。
 
-親のSIGPIPE無視は維持し、子はexecve前にSIGPIPEをSIG_DFLへ戻す。回収のためのSIGCHLD無視は行わない。シグナル設定・dup2・chdir・execve等の子側失敗の検出と終了方法は9/10で確定する。対象はWebservが直接起動したCGIの子で、孫プロセスの列挙・プロセスグループの管理は追加しない。
+親のSIGPIPE無視は維持し、子はexecve前にSIGPIPEをSIG_DFLへ戻す。回収のためのSIGCHLD無視は行わない。シグナル設定・dup2・chdir・execve等の子側失敗の検出と終了は、項目9/10の現時点の採用案に従う。対象はWebservが直接起動したCGIの子で、孫プロセスの列挙・プロセスグループの管理は追加しない。
 
 根拠: [Linux wait(2)](https://man7.org/linux/man-pages/man2/waitpid.2.html)のWNOHANGと子の回収、[kill(2)](https://man7.org/linux/man-pages/man2/kill.2.html)、[pipe(7)](https://man7.org/linux/man-pages/man7/pipe.7.html)のEOFと不要なfd、[poll(2)](https://man7.org/linux/man-pages/man2/poll.2.html)のPOLLHUPと残データ、[close(2)](https://man7.org/linux/man-pages/man2/close.2.html)の再試行の扱い、[F_GETFD/F_SETFD](https://man7.org/linux/man-pages/man2/F_GETFD.2const.html)と[dup(2)](https://man7.org/linux/man-pages/man2/dup.2.html)のFD_CLOEXEC、および[signal(7)](https://man7.org/linux/man-pages/man7/signal.7.html)のSIGKILLと無視されたシグナルの継承。
 
-### 子の起動失敗・終了方法と時間計測の現時点の採用案(残項目9/10)
+### 子の起動失敗・終了方法と時間計測の現時点の採用案(項目9/10)
 
 **制約は確定(CGI-119)**: ユーザー確認により_exit・clock_gettimeは使用不可。
 
@@ -704,11 +536,11 @@ mainのreturnによる通常終了は[C++規格草案N1905 §3.6.1/5](https://ww
 - fork直前に現在値を読み、CgiProcessに開始値を保存する。EventLoopはCGI実行中に各周1回取得した現在値を全CGIの判定に共有し、`現在値 - 開始値 >= 10.0`なら504で打ち切る。途中の入出力で開始値を変更せず、EOF後に子が終了しない場合も対象とする。
 - 8/10の最大100 msのpoll待ちを維持する。/proc/uptimeの表示精度は0.01秒であり、タイムアウトはこの精度とイベントループの確認周期に従って検出する。10秒ちょうどにシグナルが届く実時間保証はしない。
 - CGI開始前の取得失敗は500で起動せず、実行中の取得失敗・値の逆行は該当する未完了CGIを500で打ち切る。先に記録した失敗は保持する。取得できない時に期限なしで継続するフォールバックは設けない。ConfigのC-40の検証項目を増やす合意ではない。
-- Linuxの/procが利用できる実行環境を前提にする。壁時計ではなく起動後の経過時間を用い、サスペンド時間も含む。ファイルの再読みによるI/Oは増えるが、禁止された時刻関数を使わずに10秒を測る方法とする。通常接続の60秒の起点やDate/ログの暦日時は別議題とし、ここでそれらの仕様を確定した扱いにしない。
+- Linuxの/procが利用できる実行環境を前提にする。壁時計ではなく起動後の経過時間を用い、サスペンド時間も含む。ファイルの再読みによるI/Oは増えるが、禁止された時刻関数を使わずに10秒を測る方法とする。通常接続の計時はHTTP-70で同じ取得方法を採用する。受信/送信の60秒はHTTP-68・69、ログの日時省略はHTTP-73に従う。起動後の経過時間からDateの暦日時を生成せず、HTTP-56の暫定案を維持する。
 
 根拠: [Linux proc_uptime(5)](https://man7.org/linux/man-pages/man5/proc_uptime.5.html)の2つの数値とサスペンド時間、[カーネルのuptime.c](https://github.com/torvalds/linux/blob/master/fs/proc/uptime.c)の起動後時間と小数2桁の出力、[generic.cの通常ファイル登録](https://github.com/torvalds/linux/blob/master/fs/proc/generic.c)。明示的に使うopen/read/close・fork/dup2/chdir/execve/fcntl/signal/waitpidは課題PDFの許可一覧内。mainのreturnは言語の通常の終了方法であり、明示的なexitの追加使用ではない。
 
-### エラーの受け渡しと結合時の完了条件の合意事項(残項目10/10)
+### エラーの受け渡しと結合時の完了条件の合意事項(項目10/10)
 
 **確定(CGI-128〜135)**: 最後の10/10を合意済み。これで10項目の合意は完了。9/10の代替案の実環境検証と実装・結合試験はこれから行う。
 
@@ -723,37 +555,11 @@ mainのreturnによる通常終了は[C++規格草案N1905 §3.6.1/5](https://ww
 7. **応答を返せない場合**: クライアント切断時は停止・回収だけを行い、応答を生成しない。送信失敗後に別のエラー応答を追加送信しない。listen側のCLOEXEC設定失敗は起動失敗、acceptしたfdの設定失敗はその接続を閉じて監視へ登録しない。CGIパイプの設定失敗は上記の親500/子502の分類を使う。
 8. **結合の完了条件**: 04のCGI受入項目を実装後に満たすことを条件とする。正常なGET/POST・chunked入力、入出力の並行処理、出力検証・エラーコード・上限・期限、切断/半閉鎖/SIGINT、fd継承・子の回収・寿命、CGI実行中の静的配信を確認する。加えて正常なCGIの404/599の置換、200の非置換、エラーページ未指定/読取失敗/空ファイル、元本文の符号化等の除去とAllow等の保持、不正な404出力が502になることを確認する。9/10の代替案は実環境で検証し、必要なら方法を見直す。10項目の合意完了と、未実装の結合試験合格は別に扱う。
 
-### 合意済みの外部に見える仕様
-
-以下は合意済みの仕様の確認表。実装・試験の完了を意味しない。
-
-| 合意 | 論点 | 推奨案・確定する内容 |
-|---|---|---|
-| [x] | CGIファイルパスの結合・検証 | 残項目5/10としてCGI-84〜90で確定済み。root/aliasの結合、スクリプトまでの検査、種別・R_OK、Pythonの要求時事前検査とリトライの省略、stat/access失敗の分類を採用する。C-24〜26のURL処理・symlinkの運用前提は維持する |
-| [x] | 実行パス・cwdの受け渡し | CGI-26の動作とCGI-91〜98の担当・APIで確定済み。rysatoが解決したスクリプト絶対パスとcwdをCgiRequestでtasugiyaへ渡す |
-| [x] | HTTPヘッダーの転送 | CGI-39〜49と残項目4/10のCGI-75〜83で動作を確定済み。転送対象、追加の除外、trailer、Connectionの複数行、共通の値の文字検査、Content-Type、除外対象の重複、内容符号化・NULの規則に従う。HTTPパーサーの全行保持・受け渡しAPIは6/10、所有権・寿命は7/10で確定済み |
-| [x] | 出力の基本構文・値、Content-Type・Statusの検証 | 残項目1/10としてCGI-56〜61で確定済み。Statusコードは100〜599。Location、Content-Length、その他のヘッダーとHTTP応答への変換は残項目2/10・3/10で確定済み |
-| [x] | リダイレクトの詳細 | 残項目2/10としてCGI-62〜66で確定済み。Locationの一般URI構文、単独時の302、Location・Status・Content-Typeの形式、対応する5種類のコード、不完全な形式と内部・相対Locationの502を採用する |
-| [x] | その他の応答ヘッダー・HTTP応答変換 | 残項目3/10としてCGI-67〜74で確定済み。長さの数値・実長照合・生成、全ヘッダーの重複拒否、接続用ヘッダーの除外、非空Transfer-Encodingの502、その他のヘッダー転送、204・205・304の本文禁止と1xxだけで終了するCGIの502を採用する |
-| [x] | stderr | CGI-51で確定済み。Webservのstderrを引き継ぎ、stdoutへ混ぜず専用のパイプ・監視・収集処理を追加しない。stderrへの出力だけでは502にしない |
-
-内部リダイレクトを対象外とする決定により、Requirementsと本書のCGI方針は「RFC 3875を参考に、対応範囲を限定」とする。課題PDFに個別の対応範囲が明記されていない機能を、課題から免除されたと断定しない。
+内部リダイレクトを対象外とするため、本チームは「RFC 3875を参考に対応範囲を限定」とする。課題PDFに個別の対応範囲が明記されていない機能を、課題から免除されたとは断定しない。
 
 ### 合意済みの分担・受け渡しと未実施の結合テスト
 
-大枠の分担はtasugiya=ネットワーク/イベントループ、rysato=HTTP/Config、CGIの結合は共同。下表の処理の担当は6/10で確定済み。所有権・寿命・後始末・エラー適用境界も合意済み。以下のテストの未チェックは、実施・合格が未完了であることを示す。
-
-| 担当 | 責任 |
-|---|---|
-| tasugiya | pipe/fork/execve、パイプI/O、pid・fd・実行状態の所有、時間管理、子の終了・回収、切断時の後始末 |
-| rysato | 実行対象・パスの解決、環境変数の内容、CGI出力の解析、HTTP応答の生成 |
-| 共同 | 以下の受け渡し、確定済みエラー・上限の実装境界、結合テスト |
-
-- [x] **APIと戻り値**: CGI-91〜98で確定済み。CgiRequest / CgiResult / ConnectionInfo、RouterのrouteとparseCgiOutput、CgiExecutorのstart、CgiProcessのtakeResultを使う。argvの可変一覧・生の終了状態を別途受け渡さない。
-- [x] **データの寿命**: CGI-99〜106で確定済み。本文はCgiProcessへのコピー、起動情報はfork前の一時データ、stdoutはCgiResultへのswapとする。EventLoopがClient/CGIを所有し、Client破棄前に非所有ポインターを外す。
-- [x] **切断・終了時の処理**: CGI-107〜118で確定済み。監視解除・一度だけのclose・必要なSIGKILL・WNOHANG回収・結果受け渡し後の削除とする。fdはCLOEXECで継承を制御し、親子のSIGPIPE設定・半閉鎖・古いpoll通知・SIGINT終了も合意済み。
-- [x] **子の起動失敗と時間計測(現時点の採用案)**: CGI-119〜127を採用する。mainへのreturnと子専用の明示的解放による終了、/proc/uptimeによる計時は、実装・実行環境・動作確認で見直し得る代替案。失敗時の親用処理の回避・終了処理の副作用・計時精度と負荷を検証して判断する。
-- [x] **エラーを返す境界**: CGI-128〜134で確定済み。実行失敗時は部分stdoutを使わずmakeError、成功時はparseCgiOutputで検証後にapplyErrorPageとする。最初の失敗コードを保持し、正常なCGIの400〜599も既存Configの本文置換方針に従う。
+担当・APIは項目6/10、所有権・寿命は7/10、後始末は8/10、起動・計時の採用案は9/10、エラー適用境界は10/10を参照する。以下は未実施の結合テストであり、未チェックは未合意を意味しない。受入項目の一覧は [04](04_testing_and_workplan.md) にまとめる。
 
 - [ ] **共通の結合テスト**: GETのクエリ、POST/HTTP1.1 chunkedのボディ、cwdからの相対ファイル読み込み、パイプ容量を超える入出力、出力形式の異常、即時終了、タイムアウト、クライアント切断、各上限への到達を確認する。上記の後続パス4例、index.pyの実行、CGI用locationへのDELETEが405になること、アップロード先でCGIが実行されないことも含める。CGI実行中も静的配信でき、終了後にfdや未回収の子が残らないことを完了条件にする。
 - [ ] **合意済み出力のテスト**: Status省略の文書応答が200、明示したStatusの反映、LF/CRLFの両形式、絶対URLのLocationのみで302、Content-LengthなしでEOFまでの受信、長さ一致時の成功・不一致時の502を確認する。本文中の空行も保持する。内部リダイレクトは実行されないことを確認し、ローカルLocationはCGI-65に従って502とする。
