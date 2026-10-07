@@ -10,7 +10,7 @@
 | rysato | B | HTTP層・設定ファイル・ルーティング |
 | 両名 | 共同 | CGIの結合・共通処理 |
 
-詳細は [Requirements.md](Requirements.md) と [作業分解](reports/00_README_overview.md) を参照。Config・CGIの設計判断は合意済み。CGI内の担当境界・APIは [03](reports/03_config_cgi_upload.md#cgi-api)、Configの決定表は [05](reports/05_config_agreement.md#config-decisions) を参照。CGIの起動・計時方法は検証後に見直し得る採用案。HTTPの1/10(要求行)・2/10(入力ヘッダー)・3/10(本文/chunked)・4/10(静的ファイル)・5/10(autoindex)・6/10(アップロード)は合意済み。7/10(DELETE/途中ファイルの後始末)は動作方針を合意済みで、削除手段は未解決。8/10(HTTP応答生成)は合意済みで、Date省略は暫定案。9/10(HTTP API/データの保持)も合意済み。10/10(ネットワーク境界・計時・通常ファイルI/O、HTTP-65〜74)も合意済み(採用案を含む)。10項目の動作方針の判断は完了し、削除手段の未解決・Dateの暫定案・採用案の実環境検証は [04](reports/04_testing_and_workplan.md#remaining-design) で管理する。
+詳細は [Requirements.md](Requirements.md) と [作業分解](reports/00_README_overview.md) を参照。Config・CGIの設計判断は合意済み。CGI内の担当境界・APIは [03](reports/03_config_cgi_upload.md#cgi-api)、Configの決定表は [05](reports/05_config_agreement.md#config-decisions) を参照。CGIの起動・計時方法は検証後に見直し得る採用案。HTTPの1/10(要求行)・2/10(入力ヘッダー)・3/10(本文/chunked)・4/10(静的ファイル)・5/10(autoindex)・6/10(アップロード)は合意済み。7/10(DELETE/途中ファイルの後始末)はstd::removeによる削除手段を含め合意済み。8/10(HTTP応答生成)は合意済みで、Date省略は暫定案。9/10(HTTP API/データの保持)も合意済み。10/10(ネットワーク境界・計時・通常ファイルI/O、HTTP-65〜74)も合意済み(採用案を含む)。10項目の動作方針の判断は完了し、Dateの暫定案・接続情報取得失敗時の扱い・採用案の実環境検証は [04](reports/04_testing_and_workplan.md#remaining-design) で管理する。
 
 ## 設定ファイル参考
 https://props-room.com/articles/handbook/nginx-guide-237

@@ -89,7 +89,7 @@ HTTP/1.2〜1.9の要求はHTTP/1.1と同じ規則で扱う(HTTP-04)。受信し�
 - 従来のノンブロッキングI/Oでは `-1` かつ `EAGAIN/EWOULDBLOCK` を「待てばよい」、`EINTR` を「リトライ」、それ以外を「致命エラー」と区別する。**これを errno で区別できない**。
 - **合意済み**: 通常ソケットはHTTP-65〜67、CGIパイプはCGI-112に従う。各周に各方向最大1回とし、recvの負値、送るデータがあるsendの0以下は接続を閉じる。recv=0は受信EOFであり、要求受信中か応答中かで扱いを分ける。poll後でもエラーは起こり得るため戻り値検査を省かない。
 
-- 課題PDFのerrno禁止はread/write後の挙動変更について記されている。CGIのstat/access失敗は、失敗直後のerrnoをCGI-90の404/403/414/500の分類に使う。read/write(recv/send)のエラー処理にはこの分類を適用しない。accept/poll等の具体的な分岐方法は別途確定する。
+- 課題PDFのerrno禁止はread/write後の挙動変更について記されている。CGIのstat/access失敗は、失敗直後のerrnoをCGI-90の404/403/414/500の分類に使う。DELETEのstd::remove失敗はHTTP-48に従い失敗直後のerrnoで分類する。read/write(recv/send)のエラー処理にはこの分類を適用しない。保存失敗後にstd::removeを呼ぶ場合も、書き込み失敗のerrnoではなく削除呼出し自身の結果を使い、元の500を維持する。accept/poll等の具体的な分岐方法は別途確定する。
 - `EMFILE`(fd枯渇)時の `accept` 失敗 → listen fd が常にPOLLINのままになるbusy loop化(対策: 接続数上限、失敗時のログ抑制)。
 
 > **未実施の検証**: 「poll→各方向1回」の部分送受信・再通知・EOF/RST・ハングの有無は04で確認する。accept/poll自体の失敗処理はtasugiya側の残る内部設計であり、HTTP 10項目の完了と混同しない。
@@ -108,7 +108,7 @@ HTTP/1.2〜1.9の要求はHTTP/1.1と同じ規則で扱う(HTTP-04)。受信し�
 
 - CGIと同じLinux /proc/uptimeの取得方法を通常接続にも使う採用案。各周1回の現在値を共有し、poll待ちは通常接続だけでも最大100 ms。通常接続の計時失敗/逆行はclose、CGIの計時失敗は既存の500と停止/回収に従う。
 - 計時元の利用可否・精度・追加I/O負荷とslowlorisへの期限適用は未検証。期限はEventLoopで検出するため、同期ファイル処理でループが止まる問題の解決にはならない。
-- clock_gettimeは使用不可。time/gettimeofday等を追加使用できるとは判断しない。Date生成はHTTP-56の暫定案、ログはHTTP-73の[LEVEL] messageとし、経過時間と暦日時を区別する。
+- clock_gettimeは使用不可。C++98標準ライブラリと一覧外のOS関数を区別する(Requirements §4)。std::removeの採用によって経過時間の取得方法やDate生成の設計を変更したとは扱わず、DateはHTTP-56の暫定案、ログはHTTP-73の[LEVEL] messageとし、経過時間と暦日時を区別する。
 
 ## N8 シグナル 【tasugiya, R:M, D:S, ★★】
 
@@ -148,4 +148,4 @@ HTTP/1.2〜1.9の要求はHTTP/1.1と同じ規則で扱う(HTTP-04)。受信し�
 | N1–N2 | M | man を読めば足りる。短時間で資料化可 |
 | N3–N5 | XL | 仕様化で最も判断が多い。**errno制約の下での設計**はtasugiyaの最重要資料 |
 | N6–N9 | M〜L | 小項目が多い。表にまとめやすい |
-| 未解決/未検証事項 | S〜 | 削除手段の外部確認、計時/一括ファイル処理の実環境検証。accept/pollの失敗処理はN5 |
+| 未解決/未検証事項 | S〜 | 接続情報取得失敗時の扱い、計時/一括ファイル処理の実環境検証。accept/pollの失敗処理はN5 |
