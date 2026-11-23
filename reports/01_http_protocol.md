@@ -1,8 +1,10 @@
-# 01 HTTPプロトコル — 理解すべきこと(主担当: rysato、一部共同)
+# 01 HTTPの受信・解析と応答
 
-一次情報: RFC 9112(メッセージ構文)、RFC 9110(意味論)、RFC 3986(URI)、RFC 1945(HTTP/1.0)。
+HTTPの受信側は、届いたバイト列から要求行、ヘッダー、本文を順に読み取ります。1回の受信で要求全体が届くとは限らないため、Clientは受信した断片をそのままHttpRequestへ渡します。HttpRequestの実装と最初の試験は[実装の始め方](06_implementation_guide.md)から確認できます。
 
-本チームの確定範囲は[Requirements](../Requirements.md)を参照。要求行の1/10はHTTP-01〜05、入力ヘッダーの2/10はHTTP-06〜11、本文/chunkedの3/10はHTTP-12〜19、静的ファイルの4/10はHTTP-20〜26、autoindexの5/10はHTTP-27〜32、アップロードの6/10はHTTP-33〜44で合意済み。DELETE/途中ファイルの後始末の7/10はstd::removeによる削除を含めHTTP-45〜50で合意済み。HTTP応答生成の8/10はHTTP-51〜58で合意済み(Date省略は暫定案)。HTTP API/データの保持の9/10はHTTP-59〜64で合意済み。HTTP/1.2〜1.9は1.1の要求規則を適用し、受信表記を保持する。HTTP/1.0で応答し、HTTP/1.0と課題に必要なHTTP/1.1要求を受理する。1接続1要求で、keep-alive・pipelining・100 Continue・chunked応答は実装対象外。以下ではRFCの学習項目と、採用済みの方針・未決定事項を区別する。
+このプロジェクトはHTTP/1.0で応答し、HTTP/1.0と課題に必要な範囲のHTTP/1.1要求を受け付けます。HTTP/1.2〜1.9にはHTTP/1.1の要求規則を適用し、受信したバージョン表記を保持します。1接続につき1要求を処理し、keep-alive・pipelining・100 Continue・chunked応答は対象外です。[HTTPの決定事項](../Requirements.md#http-agreements)
+
+以下は、各処理の背景を調べるための資料です。メッセージ構文はRFC 9112、意味論はRFC 9110、URIはRFC 3986、HTTP/1.0はRFC 1945を参照します。
 
 ---
 
@@ -151,7 +153,7 @@ Configのerror_pageは100〜599のコードを受理する(C-20)。この設定�
 **合意済み(HTTP-51〜58)**: 正本は [RequirementsのHTTP応答](../Requirements.md#http-response)。
 
 - HTTP/1.0・CRLF・Connection: closeを生成する。通常のCLは最終本文のバイト数(空なら0)、CTは既決定のMIME表/text/htmlを使う。本文禁止のCGIステータス等は既決定を維持する。
-- Webservの405にはlocationの許可メソッドをGET, POST, DELETEの固定順でAllowへ列挙する。Webservの301/302は既決定のLocationと空本文/CL0。CGIの転送規則は維持する。
+- locationのメソッド禁止による405は、その許可メソッドをGET, POST, DELETEの固定順でAllowへ列挙する。2026-11-16合意: CGI有効/POST許可でも実在する対象または選択indexがCGI非対象なら405とし、GET許可ありはAllow: GET、POSTのみ許可は空のAllowとする。処理不能なPOSTを含めない。正本は[Requirements](../Requirements.md#cgi-post-non-script)。Webservの301/302は既決定のLocationと空本文/CL0。CGIの転送規則は維持する。
 - Serverは生成しない。Dateは使用可能な暦日時取得手段の確認まで生成しない暫定案。DateのRFC推奨/必須規定との差、免除と説明しないこと、見直し条件はHTTP-56を参照する。CGI由来のServer/Dateを除去する決定ではない。
 - Last-Modified/ETagは静的配信で生成しない(HTTP-26)。charsetの一律付与・文字コード変換も追加しない。
 - **CGI応答の変換(確定済み)**: 通常の文書応答はContent-Type・空行・本文を解釈し、Status省略時は200。Status指定時はHTTPステータス行へ反映し、Statusヘッダー自体は転送しない。CGIヘッダーのLF/CRLFを受理し、HTTPヘッダーはCRLFで生成する。本文の改行は変換しない。

@@ -1,11 +1,10 @@
-# 実装前に理解すべきこと・作業分解 — 全体像
+# webservの全体像と作業分担
 
-> 対象: webserv(C++98 HTTPサーバー)。`Requirements.md` の要件とチーム決定(担当tasugiya=ネットワーク/イベントループ、rysato=HTTP層/設定、CGIは共同)を前提に、
-> **実装に入る前の「調査 → 仕様作成」フェーズ**で必要な理解事項と作業量を整理したもの。確定事項と、これから合意する仕様・設計案を分けて扱う。
+rysatoはHTTPと設定、tasugiyaはネットワークとイベントループを担当します。CGIの結合と、両者の間で受け渡すデータは共同で扱います。実装を始めるときは[実装の始め方](06_implementation_guide.md)を参照してください。
 
-実装範囲は課題PDFと [Requirements](../Requirements.md) を基準にする。Config(C-01〜42)とCGI(CGI-01〜135)の合意は完了。CGIの起動・計時方法は現時点の採用案として実環境で検証する。HTTPの1/10(要求行、HTTP-01〜05)・2/10(入力ヘッダー、HTTP-06〜11)・3/10(本文/chunked、HTTP-12〜19)・4/10(静的ファイル、HTTP-20〜26)・5/10(autoindex、HTTP-27〜32)・6/10(アップロード、HTTP-33〜44)は合意済み。7/10(DELETE/途中ファイルの後始末、HTTP-45〜50)はstd::removeによる削除手段を含め合意済み。8/10(HTTP応答生成、HTTP-51〜58)は合意済みで、Date省略は暫定案。9/10(HTTP API/データの保持、HTTP-59〜64)も合意済み。10/10(ネットワーク境界・計時・通常ファイルI/O、HTTP-65〜74)も合意済み(採用案を含む)。10項目の動作方針の判断は完了し、Dateの暫定案・接続情報取得失敗時の扱い・採用案の実環境検証は [04](04_testing_and_workplan.md#remaining-design) で管理する。
+HTTP、Config、CGIの動作は[要件・設計の正本](../Requirements.md)に記録しています。通常ファイルの読み書きとautoindexは、接続ごとのタスクに途中状態を持たせ、イベントループの各周に分けて進めます。応答はヘッダーと本文を別々に送り、クライアントごとの送信位置を保持します。
 
-合意済みの内容、検証後に見直し得る採用案、未合意の設計、未実施の試験を区別する。同じ決定表やAPI宣言を複数の資料へコピーせず、下表の正本を参照する。
+CGIの起動・計時や各周の処理量には、実環境で確かめてから見直す採用案があります。以下の調査表は担当や背景を調べるときに使い、現在の試験項目・保留事項は[試験項目と進行計画](04_testing_and_workplan.md#remaining-design)を参照してください。
 
 ## 資料構成
 
@@ -16,7 +15,8 @@
 | `01_http_protocol.md` | HTTP仕様(RFC 9110/9112)の理解事項: メッセージ構造、パース規則、メソッド、ステータスコード、ヘッダー、chunked、接続管理 |
 | `02_network_io.md` | ソケット・poll・ノンブロッキングI/O・タイムアウト・シグナル・エラー処理(errno禁止制約を含む) |
 | `03_config_cgi_upload.md` | 設定ファイル設計、ルーティング、静的配信/autoindex、アップロード、CGIの合意済み規則の説明・共有API・起動と計時の採用案、Cookie(必須範囲外のボーナス資料) |
-| `04_testing_and_workplan.md` | 検証方法(telnet/curl/nginx比較/負荷)と、調査→仕様→実装の進行計画、決定が必要な論点リスト |
+| [04_testing_and_workplan.md](04_testing_and_workplan.md) | 接続・HTTP・CGIの試験、負荷試験、進行計画、検証後に見直す採用案 |
+| [06_implementation_guide.md](06_implementation_guide.md) | 最初のGETの解析から、応答生成と静的配信の結合までの手順 |
 | [05_config_agreement.md](05_config_agreement.md) | NGINXを参考にしたConfigの合意事項・設定例・型とAPI。Config決定表C-01〜42・詳細・型/APIの正本。合意済み |
 
 ## 凡例

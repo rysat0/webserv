@@ -2,7 +2,9 @@
 
 > 記録日: 2026-10-04。Configの6項目合意完了: 2026-10-05。資料整理: 2026-10-07。対象: webservの設定ファイル。作成時のブランチ: `research`。
 
-NGINXを基本に、課題要件を満たす範囲でConfigの文法・設定項目・検証を小さくするための資料。本書のHTTP/1.1要求規則はHTTP-04に従いHTTP/1.2〜1.9にも適用する。要求先の追加の文字検査はHTTP-05を参照する。Configのパス規則・限定文法と、CGI関連の設定方針を確定事項として記録する。
+ConfigParserは、設定ファイルを読み込み、文法や値を検証してConfigを組み立てます。NGINXの設定を参考にし、課題で必要な項目に絞っています。受理する設定とパスの解決規則は[決定表](#config-decisions)、実装で使う型と関数は[Configの型とAPI](#config-api)を参照してください。
+
+HTTP/1.2〜1.9の要求にはHTTP/1.1の規則を適用します。要求先に使える文字は[HTTP-05](../Requirements.md#http-request-line)、CGIに関する方針は[CGIの決定表](../Requirements.md#cgi-decisions)を参照してください。
 
 <a id="config-decisions"></a>
 
@@ -186,7 +188,7 @@ location    := location URL-prefix { location用ディレクティブ(0個以上
 - **確定(C-31)**: HTTP/1.0・HTTP/1.1要求のリクエスト行とHTTPヘッダーの改行はCRLFだけを受理し、単独LF・不正な単独CRは400とする。受信断片の末尾がCRだけなら、その時点では不正とせず次のバイトを待つ。次がLFなら正常なCRLFとして扱い、LF以外なら不正と判定する。切断やタイムアウトで未完了になった場合は既存の接続処理に従う。この改行制限はボディのデータには適用せず、ボディ中のCR/LFを変更・拒否しない。CGI出力ヘッダーのLF/CRLF両方受理と、HTTP応答ヘッダーのCRLF生成はCGI-15の既決定を維持する。
 - **確定(C-30)**: Host値は前後のSP/HTABを取り除いてから、IPv4またはASCIIホスト名と任意の `:port` として検証する。ホスト名はASCII英数字と `-` からなる空でない要素を `.` で区切り、各要素の先頭・末尾は英数字とする。localhostのような単一要素、大文字・小文字、末尾の `.` 1個を受理する。IPv4はドット区切りの4個の十進数で各0〜255。ポートは省略可、明示するなら十進数の1〜65535で空値は拒否する。Host全体の空値、途中の空白・タブ、重複、不正な値、スキーム・パス・ユーザー情報付きの値は400。IPv6の角括弧表記とHost内のパーセント表記は受付対象外として400にする。DNSへの問い合わせや名前の実在確認は行わず、Hostによる仮想ホスト選択も行わない。HTTP/1.0のHost省略可、HTTP/1.1の欠落400、自動補完URLでの使用方法はC-28を維持する。この受付範囲は本課題用の限定仕様であり、RFCのHost構文全体を実装するものではない。
 - **確定(C-29)**: C-27の自動補完のLocationを生成するときは、デコード・正規化済みのパスに末尾 `/` を付け、ASCII英数字(A-Z / a-z / 0-9)・`- . _ ~` と区切りの `/` だけをそのまま出力する。それ以外はバイトごとに大文字16進の `%XX` へ変換する。例: 内部パス `/hello world` → `/hello%20world/`、`/a+b` → `/a%2Bb/`、`/name?part` → `/name%3Fpart/`、`/literal%20` → `/literal%2520/`。URLとして既にエンコード済みの文字列へ重ねて適用せず、内部のデコード済みパスから一度生成する。queryは元の表記を保持して後ろに付け、デコードも再エンコードも行わない。例えばHost localhost:8080への `/hello%20world?name=a+b` は `http://localhost:8080/hello%20world/?name=a+b` へ案内する。Configのreturnの固定URLはこの変換の対象にしない。
-- **確定(C-28)**: C-27の自動補完のLocationは `http://` で始まる絶対URLとする。有効なHostがあればホスト名と明示ポートを使い、HostにポートがなければURLにも追加しない(HTTPの既定80番)。HTTP/1.0でHostがない場合だけ、acceptした接続のサーバー側IP・ポートをgetsocknameで取得して使う。listenのワイルドカード値0.0.0.0やクライアント側IP・ポートを代用しない。HTTP/1.0・1.1ともHostの重複・不正は400、HTTP/1.1のHost欠落も400。tasugiyaが接続のサーバー側IP・ポートを取得して渡し、rysatoがHostの検証とURL組み立てを担当する。Forwarded / X-Forwarded-*を参照せず、ConfigのreturnはC-21の固定URLを使う。パスの再エンコードはC-29に従う。Hostの受付範囲はC-30に従う。接続情報の受け渡しAPIはCGI-93のConnectionInfoで合意済み。取得失敗時の扱いは、残るHTTP/ネットワーク境界の設計で明確にする。
+- **確定(C-28)**: C-27の自動補完のLocationは `http://` で始まる絶対URLとする。有効なHostがあればホスト名と明示ポートを使い、HostにポートがなければURLにも追加しない(HTTPの既定80番)。HTTP/1.0でHostがない場合だけ、acceptした接続のサーバー側IP・ポートをgetsocknameで取得して使う。listenのワイルドカード値0.0.0.0やクライアント側IP・ポートを代用しない。HTTP/1.0・1.1ともHostの重複・不正は400、HTTP/1.1のHost欠落も400。tasugiyaが接続のサーバー側IP・ポートを取得して渡し、rysatoがHostの検証とURL組み立てを担当する。Forwarded / X-Forwarded-*を参照せず、ConfigのreturnはC-21の固定URLを使う。パスの再エンコードはC-29に従う。Hostの受付範囲はC-30に従う。接続情報の受け渡しAPIはCGI-93のConnectionInfoで合意済み。取得失敗時の扱いは、残るHTTP/ネットワーク境界の設計で明確にする。 接続先情報はaccept直後に取得し、取得に成功した接続を登録する。失敗時の扱いは[接続先情報の取得失敗時の契約](../Requirements.md#getsockname-failure)に従う。
 - **確定(C-27)**: GETでlocationを選択し許可メソッドを確認した後、選択した配信locationのroot/aliasで解決した対象が実ディレクトリで、正規化後のURLパスが `/` で終わらなければ、末尾 `/` 付きURLへ301を返す。queryは保持し、例えば `/docs?lang=ja` の移動先のパスとqueryは `/docs/?lang=ja` とする。末尾 `/` 付きの要求でC-15のindex→未発見ならautoindexの処理へ進む。POST・DELETEにはこの自動補完を適用せず、各メソッドの処理規則に従う。returnがあるlocationはC-21・C-22の指定を使う。location選択は変更せず、`location /docs/` を `/docs` に一致させる特別扱いは追加しない。Locationのホスト名・ポートの出所はC-28に従う。パスの再エンコードとqueryの保持はC-29に従う。
 - **確定(C-26)**: 公開・CGI・アップロード領域は二人が管理し、配下にsymlinkを置かない運用前提とする。Webservにはsymlinkの検出・拒否機能を実装せず、関連するConfig項目も増やさない。symlinkが置かれた場合はOSがリンク先を辿り得るため、公開領域外へのアクセスを完全に遮断する仕様とはしない。URL由来のパスにはC-24・C-25のデコード・正規化を適用し、その処理だけでsymlink経由の領域外アクセスを防げるとは扱わない。CGIのファイル存在・種別・アクセス失敗とroot/aliasのパス結合はCGI-84〜90で確定済み。通常静的配信・一覧生成はHTTP-20〜32で合意済み。アップロード名・保存はHTTP-33〜44で合意済み。DELETE/途中ファイルの後始末はstd::removeによる削除を含めHTTP-45〜50で合意済み。
 - **確定(C-25)**: C-24で1回デコードしたURLパスをlocation選択前に正規化する。連続する `/` は1個にまとめ、`/` で区切った要素全体が `.` なら除去、`..` なら直前の要素を1個取り除く。URLの先頭の `/` より上へ戻ろうとした時点で400とする。`file..txt`・`.hidden` 等は変更しない。末尾 `/` と、末尾 `/.`・`/..` が表すディレクトリの末尾 `/` を保つ。例: `/a//b.txt`・`/a/./b.txt`・`/a/x/../b.txt` は `/a/b.txt`、`/a/../b.txt` は `/b.txt`、`/a/.`・`/a/b/..` は `/a/`、`/a/..` は `/`。`/../secret.txt`・`/a/../../secret.txt` は400。`/a/%2e%2e/b.txt` はデコード後に `/b.txt` としてlocationを選ぶ。この処理はURL文字列の整理であり、symlinkの扱いと公開範囲の保証の制限はC-26に従う。ファイルパスの結合・検証の残る詳細は別途確定する。末尾 `/` のない実ディレクトリへのGETはC-27に従う。
@@ -330,6 +332,289 @@ delete loop;
 ```
 
 二人で共有する確認例は、既定値補完後の型・値、C-40/C-41の検証、不正設定でruntime_errorとなりlistenへ進まないこと、upload/CGI無効時の空文字列、getterが書き換え可能な参照を公開しないこと、Configの寿命が参照元より長いこと。HTTP/Routerの残るAPIはC-42とは別議題。CGIの受け渡しAPIはCGI-91〜98、エラー適用境界はCGI-128〜135で合意済み。
+
+<a id="config-construction"></a>
+
+### Config系クラスの構築方法（暫定採用）
+
+2026-10-07、課題PDF Version 24.1にfriendの禁止規定がないこととC++98で使用できることを確認し、rysatoが以下の構築案を暫定採用した。C-42の確定事項は維持する。最終固定・実装完了とは扱わず、具体化の過程で必要があれば見直す。
+
+**暫定採用: Config / ServerConfig / LocationConfigの3クラスでConfigParserをfriendにする。** 各クラスのデータとデフォルトコンストラクターをprivateに置き、ConfigParserのメンバー関数が解析中の値を構築する。利用側へ公開する設定アクセスは、C-42のconst getterを維持する。公開setter・Builderクラス・設定値の継承機構は追加しない。
+
+```cpp
+// 構築権限を示す抜粋。完全なヘッダー宣言ではない。
+class ConfigParser;
+
+class Config {
+public:
+    const std::vector<ServerConfig>& getServers() const;
+
+private:
+    friend class ConfigParser;
+    Config();
+    std::vector<ServerConfig> servers_;
+};
+```
+
+ServerConfigとLocationConfigにも同じfriend宣言とprivateなデフォルトコンストラクターを置く。friendの権限は他のクラスへ自動的に広がらないので、3クラスそれぞれに宣言する。ConfigParserのprivateな解析関数もこの権限を使えるが、通常の非メンバー補助関数には直接アクセスさせない。
+
+構築の流れは次のとおり。
+
+1. ConfigParserがローカルなConfig / ServerConfig / LocationConfigを作る。メンバーは初期化し、数値・bool・enumを未初期化にしない。
+2. 明示された設定を読み、解析用の指定済みフラグ等で重複と禁止された併記を検出する。この解析用情報は完成したConfigの公開データに含めない。
+3. locationの種類を確定してから、既存の規則で既定値補完・パス解決・検証を行う。REDIRECTには配信設定の既定値を補完しない。構築時の安全な初期値と、設定省略時の既定値は区別する。
+4. locationをServerConfigへ、serverをConfigへ値として格納し、server間のlisten競合も検証する。途中で失敗した場合は既存のruntime_error経路へ進み、不完全なConfigを呼び出し元へ返さない。
+5. parseが返した値をmainのconst Configとして保持し、以後はconst参照とgetterで使用する。
+
+**コピーの扱いも、この構築案では値型として揃える。** 3つのデータクラスには所有する生ポインターやfdを追加せず、C-42で定めたstring・コンテナ・数値・enumだけを持たせる。コピーコンストラクター・コピー代入・デストラクターはコンパイラー生成のものを使用する。privateなデフォルトコンストラクターは、暗黙のコピーを禁止するものではない。C++98の値返しとvectorへの格納に必要なコピーを可能にし、独自の資源解放処理は書かない。
+
+ここでの「読み取り専用」は、公開setterを持たず、運用中の元Configをconstにして変更しないというC-42の契約を指す。メンバー自体をすべてconstにしたり、値型のコピー代入を禁止したりする設計ではない。コピーしたConfigを作れても、稼働中のEventLoopが参照する設定の差し替え・reloadは行わない。
+
+採用理由は、設定値を列挙する長い公開コンストラクターや構築専用クラスを増やさず、既存のConfigParserへ構築処理を集められること。代わりにConfigParserは3クラスの内部表現に依存する。構築と検証を担当する1クラスに限定した依存として扱う。
+
+次に、3データクラスの全メンバー・初期値・getter宣言、ConfigParserのprivate関数と解析中の保持データ、ヘッダーの依存関係を順に具体化する。新たなHTTP動作やConfig文法を追加する議題にはしない。
+
+### データクラスの宣言と初期値
+
+型・getter名・戻り値の形式はC-42の合意をそのまま宣言へ展開する。friend・privateなデフォルトコンストラクター・暗黙のコピー/破棄は上記の暫定採用に従う。2026-10-07、rysatoの了承を受け、以下の初期化の分担・初期値を採用した。メンバー名の末尾に`_`を付ける表記は実装案とする。
+
+**初期化の分担: コンストラクターは安全な初期値を入れ、設定省略時の既定値補完はConfigParserで行う。** 解析中の未指定判定には別途指定済み情報を使い、0・空文字列・falseだけで明示の有無を判定しない。
+
+| クラス | コンストラクターでの初期値 | ConfigParserが完成させる内容 |
+|---|---|---|
+| Config | serversは空 | 検証済みserverを1個以上格納する |
+| ServerConfig | 文字列・コンテナは空、portとclientMaxBodySizeは0 | 省略時のlistenは0.0.0.0:8000、本文上限は1 MiB。locationは1個以上。明示値を優先して検証する |
+| LocationConfig | 文字列・コンテナは空、kindはSERVE、pathModeはROOT、autoindexはfalse、redirectCodeは0 | 種類と明示項目に従い補完する。allow_methods省略はGET。配信locationではroot/aliasの規則、index.html、autoindex off等を適用する |
+
+REDIRECTではbasePath/index等を空のまま、pathMode=ROOTとautoindex=falseも未使用の値として保持する。ROOTを有効な配信設定と解釈せず、利用側はgetKind()を先に確認する。SERVEではredirectCode=0・redirectUrlは空のままとし、リダイレクト値を使わない。getterは保持値を返すだけで、種類の不一致を理由に例外を投げたり、補完・検証したりしない。
+
+これにより、コンストラクターでrootやindexを補完した後に、returnを見つけて取り消す処理を避ける。C-22の「REDIRECTへ配信既定値を補完しない」を維持する。構築途中のport=0等は利用可能な設定を意味せず、parseが正常に返る前に必ず既存の範囲・必須項目を検証する。
+
+以下は3データクラスの宣言案。必要な標準ヘッダーを含め、依存先のLocationConfig → ServerConfig → Configの順で示す。実装ファイルとヘッダーの分割、コンストラクター/getterの定義位置は後続で具体化する。
+
+```cpp
+#include <cstddef>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+
+class ConfigParser;
+
+class LocationConfig {
+public:
+    enum Kind { SERVE, REDIRECT };
+    enum PathMode { ROOT, ALIAS };
+
+    const std::string& getPath() const;
+    const std::set<std::string>& getAllowedMethods() const;
+    Kind getKind() const;
+    PathMode getPathMode() const;
+    const std::string& getBasePath() const;
+    const std::string& getIndex() const;
+    bool getAutoindex() const;
+    const std::string& getUploadPath() const;
+    const std::string& getCgiExtension() const;
+    const std::string& getCgiInterpreter() const;
+    int getRedirectCode() const;
+    const std::string& getRedirectUrl() const;
+
+private:
+    friend class ConfigParser;
+    LocationConfig();
+
+    std::string path_;
+    std::set<std::string> allowedMethods_;
+    Kind kind_;
+    PathMode pathMode_;
+    std::string basePath_;
+    std::string index_;
+    bool autoindex_;
+    std::string uploadPath_;
+    std::string cgiExtension_;
+    std::string cgiInterpreter_;
+    int redirectCode_;
+    std::string redirectUrl_;
+};
+
+class ServerConfig {
+public:
+    const std::string& getHost() const;
+    int getPort() const;
+    std::size_t getClientMaxBodySize() const;
+    const std::map<int, std::string>& getErrorPages() const;
+    const std::vector<LocationConfig>& getLocations() const;
+
+private:
+    friend class ConfigParser;
+    ServerConfig();
+
+    std::string host_;
+    int port_;
+    std::size_t clientMaxBodySize_;
+    std::map<int, std::string> errorPages_;
+    std::vector<LocationConfig> locations_;
+};
+
+class Config {
+public:
+    const std::vector<ServerConfig>& getServers() const;
+
+private:
+    friend class ConfigParser;
+    Config();
+
+    std::vector<ServerConfig> servers_;
+};
+```
+
+3クラスに独自のコピーコンストラクター・コピー代入・デストラクターは宣言しない。vectorへはConfigParserが作った値をpush_backする構成とし、privateなデフォルトコンストラクターを必要とする要素数指定の構築やresizeによる要素追加は使わない。
+
+upload無効はuploadPathが空、CGI無効はcgiExtension/cgiInterpreterが両方空という既存表現を維持し、有効/無効のboolを重ねて持たせない。設定文字列の解析、ファイル検証、location選択、HTTP応答生成をデータクラスへ追加しない。
+
+<a id="config-parser-design"></a>
+
+### ConfigParserの内部構成（採用）
+
+2026-10-07、rysatoの了承を受け、ConfigParserの保持データとprivate関数の分担を採用した。C-42の公開APIと既存文法は変更しない。別のTokenizer/Parserクラスや構文木は追加せず、トークン列から3データクラスを直接構築する。補助関数の具体的な宣言と絶対パス化の手段は後続の提案と区別する。
+
+**保持するメンバーは、トークン列・現在位置・設定ファイルのディレクトリの3つとする。** 行番号は持たず、トークンは`std::string`で表す。`;`・`{`・`}`もそれぞれ1トークンにする。入力全文は読み込み・字句解析中のローカル変数とし、解析後のConfigへ保持させない。
+
+| 保持場所 | データ | 用途 |
+|---|---|---|
+| ConfigParserのメンバー | `std::vector<std::string> tokens_` | コメントと区切り空白を除いたトークン列 |
+| ConfigParserのメンバー | `std::size_t pos_` | 次に読むトークンの位置。初期値0 |
+| ConfigParserのメンバー | `std::string configDir_` | 設定ファイルのディレクトリを絶対パスで保持し、相対パス解決に使う |
+| parseのローカル | `Config config` | 完成したserverを順に格納する |
+| parseServerのローカル | `ServerConfig server`、`std::set<std::string> seen` | 当該serverの値と、listen/body上限の明示・重複判定 |
+| parseLocationのローカル | `LocationConfig location`、`std::set<std::string> seen` | 当該locationの値と、全ディレクティブの明示・重複・併記判定 |
+
+`seen`は設定名を保持するだけの集合で、完成したConfigには入れない。`upload_store off`でも名前を記録するので、returnとの併記を検出できる。rootとaliasは別々の名前として記録し、両方あれば値を上書きする前に拒否する。error_pageはコードをキーとする既存mapへの挿入結果で重複を検出し、locationの同一prefixは既に格納したvectorを調べる。別の検索用mapは追加しない。
+
+主な宣言案は次のとおり。細かな数値変換・パス解決・ファイル検証の補助関数はこの抜粋から省略している。これらもConfigParser内のprivate関数を基本とする。
+
+```cpp
+class ConfigParser {
+public:
+    ConfigParser();  // pos_を0、コンテナと文字列を空にする
+    Config parse(const std::string& configPath);
+
+private:
+    std::vector<std::string> tokens_;
+    std::size_t pos_;
+    std::string configDir_;
+
+    std::string readFile(const std::string& configPath) const;
+    void tokenize(const std::string& text);
+    bool atEnd() const;
+    const std::string& peek() const;
+    std::string take();
+    void expect(const std::string& token);
+    std::vector<std::string> readArguments(const std::string& name);
+
+    ServerConfig parseServer();
+    LocationConfig parseLocation();
+    void parseServerDirective(ServerConfig& server,
+        std::set<std::string>& seen);
+    void parseLocationDirective(LocationConfig& location,
+        std::set<std::string>& seen);
+
+    void finishServer(ServerConfig& server,
+        const std::set<std::string>& seen) const;
+    void finishLocation(LocationConfig& location,
+        const std::set<std::string>& seen) const;
+    void validateListenConflicts(const Config& config) const;
+};
+```
+
+処理の境界は以下のとおり。
+
+1. `parse`は開始時にメンバーを空/0へ戻し、configDirを確定してファイルを読む。字句解析後は、最上位のserverだけを最後まで読む。serverが0個なら拒否し、全serverの完成後にlistenの重複・競合を検証してConfigを返す。利用は既存どおり起動時1回であり、reset/reload用の公開APIは増やさない。
+2. `tokenize`はC-04/C-37に従ってコメントを除き、文字列と記号に分割する。コメント中の文字は設定として検査せず捨てる。コメント外の引用符・バックスラッシュ・`$`は既存規則どおり拒否する。行番号やトークン専用クラスは作らない。
+3. `peek`は現在のトークンを参照し、`take`は取り出して位置を進める。末尾で呼ばれたら構文エラーとする。`expect`は指定トークンとの一致を確認して消費する。末尾は`atEnd`で調べ、空文字列等の疑似トークンを追加しない。
+4. `parseServer`は`server {`から対応する`}`まで、`parseLocation`は`location prefix {`から対応する`}`までを消費する。各ブロックのローカルな値とseenを作り、終端でfinish関数を呼んでから値を返す。閉じ括弧の後の`;`は消費せず、次の解析で不正として拒否する。未閉じブロック、余分な括弧、禁止階層の設定も拒否する。
+5. `parse…Directive`は設定名を読み、その階層で使える名前かを確認する。`readArguments(name)`で`;`までの引数を取得し、引数数・値・重複を検証して格納する。`;`より前の`{`・`}`・入力終端はエラーとし、次のブロックまで読み飛ばさない。各設定名への振り分けは通常の条件分岐とし、ハンドラー登録用の仕組みは作らない。
+6. `finishLocation`は明示された設定の組み合わせを確認し、種類を確定してから既定値補完・パス解決・C-40/C-41の検証を行う。REDIRECTの禁止併記は、値がoffでもseenで検出する。`finishServer`はlisten/body上限を補完し、error_pageのパス解決とlocationが1個以上あることの確認を行う。locationはserverのlistenやbody上限を参照しないため、server内の記述順に依存しない。
+7. `validateListenConflicts`は完成したserverを組み合わせて比較し、C-12の同一IP:portとワイルドカード競合を拒否する。IPv4は各要素を数値として比較するか、格納時に表記を統一し、先頭ゼロ等の表記差で競合を見逃さない。補助関数の具体化時に表現方法を揃える。
+
+設定の読み込み・構文・値・起動時検証の失敗は既存どおり`std::runtime_error`で上へ返す。項目名と、分かる場合のlocation/listen先をメッセージに含める。解析途中の値はローカル変数として破棄され、外部へ公開しない。副作用は設定ファイルの読み込みと既存の起動時検査に限定し、ファイル作成・listen・CGI起動は行わない。
+
+次の具体化対象は補助関数の宣言とヘッダー依存。設定ディレクトリの絶対パス化、数値の範囲検証、個別設定値の検証、stat/accessの境界を既存規則に対応させる。
+
+<a id="config-parser-helpers"></a>
+
+### 補助関数とファイル分割（具体化案・パス取得は仮決定）
+
+Config系の具体化案。以下の関数をConfigParserのprivateに置き、公開APIは増やさない。設定項目ごとにクラスや汎用Validatorを作らず、既存の条件分岐から呼ぶ。2026-10-08に下記のPWDによるパス取得を仮決定した。その他の補助関数の宣言・ファイル分割は提案として区別する。
+
+```cpp
+// ConfigParserのprivate宣言に追加する案
+std::size_t parseDecimal(const std::string& text,
+    std::size_t minValue, std::size_t maxValue,
+    const std::string& context) const;
+void parseListen(const std::string& text,
+    std::string& host, int& port) const;
+void requireArgumentCount(const std::vector<std::string>& args,
+    std::size_t minCount, std::size_t maxCount,
+    const std::string& name) const;
+void validateLocationPrefix(const std::string& prefix) const;
+void validateRedirectUrl(const std::string& url) const;
+
+std::string makeAbsoluteConfigPath(const std::string& path) const;
+std::string resolveConfigPath(const std::string& path) const;
+void requireDirectory(const std::string& path,
+    const std::string& context) const;
+void requireExecutableFile(const std::string& path,
+    const std::string& context) const;
+```
+
+| 関数・処理 | 境界と既存規則との対応 |
+|---|---|
+| parseDecimal | 空・ASCII数字以外・範囲外をruntime_errorで拒否する。各桁について乗算・加算前に上限を検査し、最後に下限を確認する。ボディ上限は1〜size_t最大、portは1〜65535、IPv4の要素は0〜255に使う。error_pageの3桁制約やreturnの301/302限定は呼び出し側で別途確認する |
+| parseListen | IPv4の4要素とportを検査し、hostは先頭ゼロのない十進表記へ統一してから格納する。例えば127.000.0.1は127.0.0.1として比較する。DNS照会や8進解釈を行わず、競合検証では統一後のhostと数値portを使う |
+| requireArgumentCount | 最小・最大を同じ値にすれば固定個数も扱える。cgi_extensionは個数だけで受理せず、1個ならoff、2個なら拡張子とPythonパスという既存の組み合わせも呼び出し側で検査する |
+| validateLocationPrefix / validateRedirectUrl | それぞれC-38、C-21の検証だけを行い、値を修正しない。HTTP要求用のデコード・正規化を呼ばない |
+| index / autoindex / methods / CGI拡張子等 | 短い個別検査はparseLocationDirectiveの対応する分岐に置く。methodsの同一行内の重複はsetへの挿入結果で検出する。長くなる場合のみprivate関数へ分ける |
+| resolveConfigPath | 絶対パスはそのまま、相対パスはconfigDir_と結合する。対象はroot/alias/upload_store/error_page。index・location prefix・return URLには使わず、Pythonパスは既存どおり絶対指定を要求する |
+| requireDirectory | stat成功とS_ISDIRを要求する。配信用root/aliasと有効なupload先だけに適用し、追加の権限検査や自動作成を行わない(C-40) |
+| requireExecutableFile | stat成功・S_ISREG・access(X_OK)成功を要求する。Pythonだけに適用し、試験実行しない(C-40) |
+
+パス結合では末尾スラッシュを勝手に補完せず、aliasの末尾条件は元の設定値で検査する。ファイルシステムのパスにHTTP URL用の正規化を適用せず、`.`・`..`はOSの解決に任せる。絶対パスであることと、symlink等を解決した正規パスであることは区別する。error_pageの存在確認やindexの存在確認をここへ追加しない。
+
+`readFile`はC++98のstd::ifstreamをbinaryモードで使う案とする。開く処理と読み取りの失敗を検査し、正常なEOFと読み取りエラーを区別する。ストリームはローカル変数として所有する。設定文字列に実NULがあれば、C文字列APIへの受け渡しで切り詰められる前に設定エラーとする。通常の設定ファイルの起動時読み込みであり、受信ソケットやCGIパイプにはこの方法を転用しない。
+
+<a id="config-pwd-resolution"></a>
+
+#### 相対指定の設定ファイルを絶対パスにする方法（仮決定）
+
+課題PDF Version 24.1の外部関数一覧にはgetcwd・realpath・readlinkがない。前節のconfigDir_を絶対パスで持つ方針だけでは、相対指定からその値を得る方法まで確定していなかった。許可済みとしてこれらの関数を導入しない。
+
+2026-10-08、rysatoの了承により、**std::getenv("PWD")を取得し、statで現在ディレクトリと一致することを確認して使う**方法を仮決定した。C++98標準ライブラリを使える既存方針に従う。makeAbsoluteConfigPathは以下の方針で具体化する。
+
+1. 引数が絶対パスならそのまま使用し、PWDを要求しない。
+2. 相対パスならPWDを取得する。NULL・空・非絶対パスは使わない。取得した文字列はstd::stringへコピーする。
+3. stat(PWD)とstat(".")が成功し、ディレクトリであり、st_devとst_inoの両方が一致することを確認する。環境変数の値だけを信用して別のディレクトリを基準にしない。
+4. 一致すればPWDと引数を結合する。parseはその絶対パスで設定ファイルを読み、最後の`/`までをconfigDir_にする。親プロセスのchdirは行わない。
+5. PWDを利用できない場合、相対指定での起動はruntime_errorとし、設定ファイルを絶対パスで指定するよう理由を示す。誤った基準やカレントディレクトリを表す相対文字列で代用しない。
+
+**最終固定ではなく、実環境での検証後に見直し得る仮決定。** 引数なしの既定値`./conf/default.conf`は維持するが、その起動にも検証可能なPWDが必要になる。PWDがない/不正な環境では絶対パス指定を求める起動条件も含めて仮決定した。一般のcwd探索の自作は、この最小案には含めない。通常起動・PWD欠落/空/非絶対パス/不一致・stat失敗・PWDに依存しない絶対パス指定を実環境で確認する。現時点では実装・動作試験は未完了。
+
+statの同一性確認の根拠は、ファイルがst_devとst_inoの組で識別されること([POSIX sys/stat.h](https://www.man7.org/linux/man-pages/man0/sys_stat.h.0p.html))。この確認はsymlinkを検出・拒否する機能を追加するものではない。
+
+#### ヘッダーと実装ファイル
+
+1クラスにつき同名の.hpp/.cppを置く案。データクラスのコンストラクターとgetterは.cppに定義し、コピー/代入/デストラクターは暗黙生成を維持する。各ヘッダーにinclude guardを置く。配置ディレクトリはプロジェクト全体の構成を決める際に揃える。
+
+| ヘッダー | プロジェクト内のinclude | 直接使う標準ヘッダー |
+|---|---|---|
+| LocationConfig.hpp | なし。ConfigParserは前方宣言 | string、set |
+| ServerConfig.hpp | LocationConfig.hpp。ConfigParserは前方宣言 | cstddef、string、map、vector |
+| Config.hpp | ServerConfig.hpp。ConfigParserは前方宣言 | vector |
+| ConfigParser.hpp | Config.hpp | cstddef、string、set、vector |
+
+C++98でvectorの要素型が必要になるため、データクラス間は上記の順に定義をincludeする。friend宣言のためにConfigParser.hppをデータクラスからincludeせず、循環を作らない。ConfigParser.cppにだけfstream・limits・sstream・stdexcept・cstdlib・sys/stat.h・unistd.h等の実装用ヘッダーを置く。OSのstat構造体やファイルハンドルを公開APIへ出さない。
+
+この節とパス取得方法が決まれば、Config系の設計を一巡したとしてHttpRequestへ進む。実装と動作試験の完了を意味しない。
 
 ### 合意状況と残る確認事項
 

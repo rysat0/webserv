@@ -1,8 +1,10 @@
-# 03 設定・ルーティング・静的配信・アップロード・CGI — 理解すべきこと
+# 03 ルーティング・静的配信・アップロード・CGI
 
-一次情報: nginx ドキュメント(`ngx_http_core_module` の server/location/root/index/autoindex/error_page/client_max_body_size/limit_except/return)、RFC 3875(CGI)、RFC 7578(multipart/form-data)、RFC 3986、RFC 6265(ボーナス)。
+Routerは、解析済みの要求とConfigを使って、どの処理に進むかを決めます。即時応答で済む場合はHttpResponseを返し、ファイル処理やCGIが必要な場合は、Client側が次の処理を始めるための指示を返します。[RouterとClientの共有API](#cgi-api)
 
-CGIの決定表の正本は [Requirements](../Requirements.md#cgi-decisions)。本書のHTTP/1.1要求規則はHTTP-04に従いHTTP/1.2〜1.9にも適用し、SERVER_PROTOCOLには受信表記を保持する。規則の説明・共有API・起動と計時の採用案は本書の [C12](#cgi-details) にまとめる。C8〜C10には調査項目も含まれ、列挙された機能すべてを実装するという意味ではない。
+CGIの環境変数、入出力、失敗時の扱いは[CGIの決定表](../Requirements.md#cgi-decisions)を参照してください。HTTP/1.2〜1.9の要求にもHTTP/1.1の規則を適用し、SERVER_PROTOCOLには受信した表記を渡します。起動・計時の採用案は[C12](#cgi-details)にまとめています。C8〜C10には調査用の項目も含みます。
+
+背景を調べるときは、NGINXの設定資料と、RFC 3875（CGI）、RFC 7578（multipart/form-data）、RFC 3986（URI）を参照します。Cookieの参考はRFC 6265です。
 
 ---
 
@@ -45,7 +47,13 @@ symlinkを置かない運用前提はC-26、CGIのファイル・パス検証は
 
 実装・受入試験は未完了。全体メモリ/I/OはHTTP-71・72の採用案に従い、実負荷で検証する。
 
+2026-11-17合意: 静的ファイル/error_pageの読み取りとアップロード保存は固定期限方式を使い、read/writeが進行しても期限を延長しない。Clientが各タスクのstart直前に開始時刻を記録し、開始準備/openを計測区間に含める。2026-11-18合意でerror_pageは自身のstart直前から新しい固定期限を設ける。error_pageの期限超過ではcancel後、元のステータス等を保持してfinishErrorPage(false, body)で内蔵HTMLを確定し、beginWritingResponseへ進む。2026-11-18に静的読み取り/保存/error_pageを各60秒の採用案とし、並行負荷試験で検証する。静的読み取り/保存の期限超過はClientがcancelでfd/部分本文/今回作成した途中ファイルを回収し、makeError(500)をprepareResponseへ渡す。error_pageは新しい60秒を使う。step前に期限確認し、超過なら呼び出さず用途別の回収/応答へ進む。step復帰後はCOMPLETEDを優先して成功経路、FAILEDは失敗経路、IN_PROGRESSなら時刻を再確認し超過時は回収/応答へ進む。start成功直後にも期限を確認し、超過ならcancel後に用途別の超過処理へ進む。start失敗は静的読み取り500、保存の返却コード、error_pageの内蔵HTMLという既存の失敗経路を使う。2026-11-18合意で進行可能なファイルタスクがある間はpoll待ち時間0とし、各周でイベント/期限を確認し各タスクを最大1回進める。タスクがなくなったら通常のpoll待ち時間へ戻す。イベント0件でもファイルタスクを進める。poll復帰後はソケット/CGIイベントを先に処理し、その後、生存中で継続する接続のファイルタスクを期限確認付きで進める。新規タスクは開始した周にstart/直後の期限確認を行い、最初のstepは次の周からとする。失敗からerror_pageへ移る場合や同じFileReadTaskの再利用も同じ契約に従う。終了確定時はClientをCLOSINGにしてタスクcancel/fd回収/CGI関連付け解除を行い、本体のdeleteとコンテナ除去はその周の最後にEventLoopが行う。後段はCLOSINGを対象から外す。2026-11-18合意でファイル処理の時刻取得/解析失敗や逆行はタスクcancel後CLOSINGへ進め、fd回収/CGI関連付け解除から周末削除へつなぐ。追加の500/error_page/内蔵HTMLを生成せず、保存成功済みファイルを保護する。2026-11-19合意でClientにfileTaskStartedThisRound_を持たせ、周頭にfalse、新規タスク開始時にtrueとする。後段のstepはtrue/CLOSINGを対象から外し、次周から進める。同じタスクのerror_page用再開始もtrueとする。2026-11-19合意で周頭リセット/poll/全体期限確認/ソケットとCGIイベント/ファイル処理/周末削除の順とする。期限処理で無効になったfdの古い通知を除外し、新規タスクは次周からstepする。操作APIと例外経路の詳細は未決定。[期限方式の正本](../Requirements.md#file-task-timeout-policy)を参照する。
+
+2026-11-19合意: autoindexは列挙・ソート・HTML生成の段階ごとに途中状態を保持し、一定量でEventLoopへ戻す。HTTP-27〜32の表示/並び順/変換/8 MiB上限/失敗分類を適用する。2026-11-20にAutoindexTaskをコピー禁止とし、C++98のprivateなコピーコンストラクター/代入演算子を宣言して定義しない。ClientがAutoindexTaskを値メンバーとして所有し、開いているディレクトリ/項目一覧/ソート途中状態/生成位置/HTML本文/段階と後始末をまとめる。ソートはボトムアップのマージソートを採用し、区間幅/左右の位置/出力位置を保持して比較と移動を分割する。2026-11-20合意で名前一覧はstd::deque<std::string>に列挙順で保持し、名前を参照する0,1,2,...の番号をソートする。比較は対応する元の名前を使い、マージでは番号を移動し、HTML生成も整列済み番号から名前を参照する。番号列と作業領域の準備も分割設計へ含める。ソート段階は1回のstepで比較/番号書き込み合計256操作の採用案とし、比較1回/番号書き込み1回を各1操作として準備/初期化/残り番号の移動も数える。HTML生成は各stepの実追加最大8 KiBを採用案とし、固定HTML/表示名/リンクの変換後バイト数を数える。項目や変換の途中位置を保持して継続する。番号列とマージ用作業領域は2026-11-21合意でstd::vector<std::size_t>を1本ずつ使う。列挙とclosedirの成功後に空の2本へ項目数分をreserveする。マージ元の番号と最初のマージの出力はpush_backで段階的に追加し、1個につき1操作として1回のstepあたり合計256操作に含める。各パスの末尾で2本をswapし、2パス目以降は出力位置をsize()と別に管理して既存要素へ上書きする。上書きも1件につき1操作と数える。[番号列と作業領域の設計](../Requirements.md#autoindex-index-containers)を参照する。[段階分割の正本](../Requirements.md#autoindex-incremental-design)を参照する。
+
 ## C6 アップロード 【rysato, R:L, D:L, ★★★】
+
+2026-11-16合意: 本文全体の検証後、RouterはFileWriteRequest(path/filename/body)とFILE_WRITE_REQUIREDを返す。Clientが値メンバーとして所有するFileWriteTask（2026-11-17合意でコピー禁止。C++98のprivateなコピーコンストラクター/代入演算子を宣言し定義しない）が新規作成・保存・後始末を担当し、各EventLoop周にwrite最大1回・最大8 KiBを進める。全量保存とclose成功後だけ200を生成する。保存本文は指示のbodyからタスクへswapで移し、移した指示側bodyは空とする。タスクは指示側本文への参照を残さない。開始APIはint start(FileWriteRequest&)とし、パス/保存名の保持とopen成功後だけ本文をswapする。0は開始準備完了、通常の開始失敗はHTTP-41のコードを返し、指示側本文を変更しない。進行APIはStepResult step()とし、IN_PROGRESS/COMPLETED/FAILEDを返す。各回write最大1回・最大8 KiB、全量保存とclose成功でCOMPLETED、writeの0/負値またはclose失敗でFAILEDとする。空本文はwriteせずclose成功で完了する。2026-11-17合意で、全量保存とclose成功をDONEとして確定し、本文/保存先パスを解放してからCOMPLETEDを返す。保存名だけをtakeFilenameまで保持する。結果取得はbool takeFilename(std::string&)とし、保存完了後の初回だけswapで保存名を渡してtrue、それ以外は出力不変でfalseとする。cancelはvoid cancel()を採用し、保存途中ならfdを閉じ今回作成した途中ファイルを削除、全量保存とclose成功後のファイルは残す。保持データを解放して未開始へ戻し、繰り返しても二重close/削除しない。デストラクターも同じ解放を行い例外を外へ出さない。内部状態はprivateなPhase(IDLE/WRITING/DONE/ERROR/TAKEN)で管理し、完了/失敗/取得済みのboolを重ねない。初期状態とcancel後はIDLE、start成功でWRITING、全量保存とclose成功でDONE、保存名取得でTAKEN、通常の開始/保存失敗でERRORとする。startはIDLEで開始し、それ以外は500でタスク/指示/ファイルを変更しない。再利用前にcancelでIDLEへ戻す。IDLEからの通常の開始失敗は、取得済みfdを一度だけ閉じ、タスクのパス/保存名/本文を解放し書き込み位置0・fd=-1でERRORへ進む。入力指示を維持し、後始末に必要なパスは削除試行/ログ記録後に解放する。stepはWRITINGで保存を進め、DONEはI/OせずCOMPLETED、ERROR/IDLE/TAKENはI/OせずFAILEDを返す。WRITING以外では状態/保持データを維持し、write/close/削除を繰り返さない。ClientのWRITING_FILEと基本遷移は2026-11-17に採用済み。開始成功後にClientがHttpRequest::releaseBody()で元本文を解放して保存中へ、未完了は維持、完了は保存名取得/makeUploadSuccessからprepareResponseへ、開始失敗は返却コード、保存失敗ではstep内でfdのclose、今回作成した途中ファイルの削除試行/失敗ログ、本文/パス/保存名の解放と位置0への復帰を済ませ、ERRORでFAILEDを返す。Clientは500をprepareResponseへ渡す。再step/cancel/破棄で同じ資源をclose/削除しない。期限と異常時の詳細遷移は未決定。[設計の正本](../Requirements.md#file-write-design)を参照する。
 
 **合意済み(HTTP-33〜44)**: 正本は [Requirementsのアップロード](../Requirements.md#http-upload)。POST許可・upload_store有効・CGIとの分離を維持する。CGIへのPOSTには本節の受付制限を適用しない。
 
@@ -53,8 +61,9 @@ symlinkを置かない運用前提はC-26、CGIのファイル・パス検証は
 - boundaryは引用符付き/なし、RFCの1〜70文字、大小文字区別。区切り/終端を確認し、区切り行末のSP/HTABを受理、前後の付加部分を捨てる。欠落・重複・不正は400。全体を検査してから保存する。
 - 各パートのContent-Disposition: form-data/nameを検査し、パートヘッダーはCRLF・折り返しなし・終端空行込み8 KiBで超過400。Content-Typeは保存に使わない。NUL/改行を含む本文を加工せず保存し、要求Content-Encodingが非空なら415、パートContent-Transfer-Encodingは省略/空/binary以外415。ネスト解析を追加しない。
 - filenameの/・逆斜線の最後の名前だけ使う。空・.・..・制御文字は400。空白/非ASCIIを保持し、percent-encodingをデコードせず、upload_store＋名前へ保存する。POST先URLはlocation選択に使う。
-- O_CREAT/O_EXCL/O_WRONLY、mode 0600で新規作成し、同名対象409。上書き/採番なし。openの権限/読み取り専用403、保存名のパス長400、保存先消失/その他500。短いwriteは残りを続け、0以下/close失敗500。write後のerrno分岐なし。
+- O_CREAT/O_EXCL/O_WRONLY、mode 0600で新規作成し、同名対象409。上書き/採番なし。openの権限/読み取り専用403、保存名のパス長400、保存先消失/その他500。短い正のwriteは位置を進めて残りを次の周へ回し、0以下/close失敗500。write後のerrno分岐なし。
 - パートヘッダー/区切りも要求本文上限に含め、超過413。追加のファイルサイズ上限なし。本文/I/Oと全体メモリはHTTP-71・72の採用案に従う。
+- 2026-11-16合意: FileWriteTaskは保存結果と保存名だけを渡し、HttpResponse/HTMLを生成しない。closeまで成功した後、rysato側のHttpResponse::makeUploadSuccess(const std::string& filename)が保存名をHTMLエスケープした200応答を作り、ClientがprepareResponseへ渡す。成功応答の生成APIは採用済み。タスクの保存名取得APIも採用済み。[分担の正本](../Requirements.md#file-write-success-response)を参照する。
 - 成功は200と保存名の結果HTML(HTMLエスケープを適用)。201/LocationというRFCの推奨と区別し、公開URLを自動推定しない。GET公開はroot/aliasを保存先へ対応させ、upload_storeから自動設定しない。
 - 保存途中の今回作成したファイルだけを、保存用fdの後始末後にstd::removeで削除する(HTTP-49・50)。削除失敗時は元の500を維持し、削除できなかったパスをログへ記録する。409等の既存対象は削除しない。
 
@@ -360,14 +369,22 @@ CGIの残件を10項目にまとめて1項目ずつ合意した記録。全項�
 
 <a id="cgi-api"></a>
 
+2026-11-16更新: CGI有効locationへの許可済みPOSTで対象が実ディレクトリなら、末尾/補完リダイレクトをせず設定indexを探し、CGI対象なら元のPOST本文を渡して実行する。別locationへ再ルーティングしない。実在する対象または選択indexがCGI非対象なら405とし、GET許可ありならAllow: GET、POSTのみ許可なら空のAllowを返す。処理できないPOSTはAllowへ含めない。要求対象のディレクトリは実在するが設定indexが不在なら403とし、autoindexがonでも一覧へ進まない。対象ディレクトリ自体の不在は既存どおり404とする。[index不在時の正本](../Requirements.md#cgi-post-missing-index)を参照する。[CGI非対象POSTの正本](../Requirements.md#cgi-post-non-script)も参照する。[ディレクトリPOSTの正本](../Requirements.md#cgi-post-directory)を参照する。
+
+2026-11-16更新: Router内のprivateな補助型CgiTargetをscriptPath/scriptName/pathInfoの3文字列で採用した。GET/POST処理内のローカル変数とし、fd・本文・Config参照を持たせず、Pythonパス/cwdも重複保持しない。CgiRequestなどの公開共有型は変更しない。[補助型の正本](../Requirements.md#router-target-api)を参照する。findCgiScriptの宣言と返却契約も採用済み。戻り値0かつfound=trueでtarget有効、0かつfalseはCGI非該当、HTTPエラーコードかつfalseは確認失敗で通常配信へ切り替えない。index選択はこの関数へ含めずGET/POSTハンドラーで行う。prepareCgiRequestもprivateなconst関数として宣言を採用済み。要求/location/接続情報/確定済みtargetからCgiRequestを生成し、成功0のときだけ出力が有効、検証失敗はHTTPエラーコードを返す。対象の再探索・Pythonの要求ごとの再検査・fork/execは行わない。GET/POST/DELETEハンドラーにはServerConfigを渡さない方針も2026-11-16に合意済み。メソッド許可/location選択はRouter本体、error_pageの設定参照は後続のClient側とし、ハンドラーは選択済みLocationConfigを使う。3ハンドラーの宣言も採用済み。privateなconst関数としてRouteResultを返し、GETはrequest/location/connectionからresponse/cgi/file/autoindex、POSTは同入力からresponse/cgi/write、DELETEはrequest/locationからresponseだけを出力する。戻り値に対応する出力だけが有効。DELETEは成功/失敗ともRESPONSE_READYとし、エラー本文は後続の共通送信準備で確定する。その他の共通補助関数の正式な宣言は提案段階。
+
 ### 担当境界と受け渡しAPIの合意事項(項目6/10)
 
 **確定(CGI-91〜98、項目6/10)**: 以下の担当境界・型・APIで受け渡す。課題PDFとRFCはCGIへの入力・出力を定めるが、Webserv内部のクラス名・担当・APIは指定しない。
+
+2026-11-15更新: 通常ファイル読み取りの分割に合わせ、RouteResultにFILE_READ_REQUIRED、routeの末尾にFileReadRequest出力引数を追加した。2026-11-16には分割保存用のFILE_WRITE_REQUIREDとFileWriteRequest出力引数も末尾へ追加した。本節を更新後の共有宣言の正本とする。CGIの要求/結果の型とプロセス側APIは維持する。FileReadTaskの所有・読み取り方式と未決定事項は[Requirementsの設計修正](../Requirements.md#file-read-design)を参照する。error_pageはClientの値メンバーHttpResponse pendingResponse_が元の応答を保持し、HttpResponse::prepareErrorPageで読み取り指示を作る方針・APIを合意済み。[準備APIの正本](../Requirements.md#error-page-prepare)を参照する。読み取り結果を受けるHttpResponse::finishErrorPage(bool, const std::string&)も合意済み。成功なら取得本文、失敗なら元コードの内蔵HTMLで確定する。makeError(code)はコードと標準説明文の元応答だけを作り、設定を受け取らず、本文生成/読み取りを行わない。生成したエラーと検証済みCGI応答を共通のprepareErrorPage経路へ渡す。RESPONSE_READYも本文確定前のエラー応答を含むため、直ちに送信できる保証とはしない。prepareErrorPageはClient側の共通送信準備で1回呼び、finishErrorPage後は再準備せず、ClientのprivateなbeginWritingResponseでserialize・送信バッファ準備を行い、受け渡し成功直後にpendingResponse_.reset()で元応答の保持領域を解放する。送信期限の起点はバッファ準備時とし、WRITING_RESPONSEへ進む。実際のsendはpoll通知後に行う。旧applyErrorPage/readErrorPageは廃止する。共通の入口はClient::prepareResponse(const HttpResponse&)として合意済み。応答をpendingResponse_へコピー後にprepareErrorPageを1回呼び、falseならserialize/送信、trueならERROR_PAGEで読み取りへ進む。std::bad_alloc時は資源回収と接続closeへ進め、500や内蔵HTMLの再生成は行わない。具体的な捕捉位置/回収経路などは設計継続中であり、下記の既存経路の説明を新方式の完成済みAPIとは扱わない。
 
 | 担当 | 処理 |
 |---|---|
 | rysato / HttpRequest・Router | 要求の構文・重複を検証し、location・スクリプト・cwdを解決してCGI環境の内容を生成する。完成済み本文とともにCgiRequestにまとめる。戻ってきたstdoutをCGIとして解析・検証しHttpResponseを生成する |
 | tasugiya / EventLoop・CgiExecutor・CgiProcess | 接続のIPv4・実際のサーバーIPv4とポートを取得しConnectionInfoで渡す。CgiRequestを使って起動し、pollでパイプI/O・上限・期限・子の終了を管理する。成功時のstdoutか失敗時のコードをCgiResultで返す |
+
+EventLoopは接続先情報の取得に成功した接続をClientとして登録する。Routerには有効なConnectionInfoを渡す。[接続先情報の取得失敗時の契約](../Requirements.md#getsockname-failure)を参照する。
 
 プロセス側はConfigのlocationやHTTPヘッダーを再解釈しない。argvは既存のPython絶対パスとスクリプト絶対パスから生成し、別の可変引数リストは受け渡さない。親のcwdは変更しない。IPv4の文字列化は4オクテットの十進表記とし、DNSや許可関数一覧にないinet_ntop/inet_ntoaを追加しない。
 
@@ -391,14 +408,38 @@ struct CgiResult {
     int errorStatus;              // 0: 実行成功、非0: サーバー側のエラーコード
 };
 
-enum RouteResult { RESPONSE_READY, CGI_REQUIRED };
+struct FileReadRequest {
+    std::string path;         // 読み取り対象の絶対パス
+    std::string contentType;  // 配信時のContent-Type
+};
+
+// 2026-11-16追加。bodyはタスクへswapで移し、引き渡し後は空とする。
+struct FileWriteRequest {
+    std::string path;      // 保存先の絶対パス
+    std::string filename;  // 検証済み保存名。成功時の結果HTMLに使用
+    std::string body;      // multipartから取り出したファイル本文。タスクへの引き渡しで消費
+};
+
+struct AutoindexRequest {
+    std::string path;     // 対象ディレクトリの絶対パス
+    std::string urlPath;  // リンク生成用の正規化済みURLパス
+};
+
+enum RouteResult {
+    RESPONSE_READY, CGI_REQUIRED, FILE_READ_REQUIRED, FILE_WRITE_REQUIRED,
+    AUTOINDEX_REQUIRED
+};
 
 // Router(rysato)。CGI起動前の拒否もRESPONSE_READYでHTTP応答を返す。
 RouteResult Router::route(const HttpRequest& request,
                          const ServerConfig& config,
                          const ConnectionInfo& connection,
-                         HttpResponse& response, CgiRequest& cgi);
-// 戻り値に対応する出力引数だけを有効とする。
+                         HttpResponse& response, CgiRequest& cgi,
+                         FileReadRequest& file, FileWriteRequest& write,
+                         AutoindexRequest& autoindex);
+// RESPONSE_READYならresponse、CGI_REQUIREDならcgi、
+// FILE_READ_REQUIREDならfile、FILE_WRITE_REQUIREDならwrite、
+// AUTOINDEX_REQUIREDならautoindexだけを有効とする。
 
 // CgiExecutor(tasugiya)。0は起動手続き成功、非0は開始時のエラーコード。
 // CGIの完了を待たずに返り、以後はEventLoopが進行する。
@@ -408,9 +449,13 @@ int CgiExecutor::start(const CgiRequest& request, CgiProcess& process);
 bool CgiProcess::takeResult(CgiResult& result);
 
 // Router(rysato)。実行成功後のstdoutを検証し、0または不正出力の502を返す。
-// 0のときだけresponseが有効。成功後にEventLoopがapplyErrorPageを一度だけ適用する。
+// 0のときだけresponseが有効。成功後に共通のerror_page準備経路へ渡す。
 int Router::parseCgiOutput(const std::string& output, HttpResponse& response);
 ```
+
+2026-11-19合意: AUTOINDEX_REQUIREDではAutoindexRequest(path/urlPath)だけが有効。Routerは既存のindex優先/autoindex設定に従って一覧生成を選び、Clientが値メンバーのAutoindexTaskを開始する。routeとhandleGetの末尾にAutoindexRequest& autoindexを追加する。指示はfdやDIR*を持たず、タスクは必要情報を値で保持して一時指示への参照を残さない。開始APIはint AutoindexTask::start(const AutoindexRequest&)を採用する。path/urlPathをタスクへコピーしてopendirし、成功0、opendir失敗はHTTP-31の404/403/414/500を返す。列挙/ソート/HTML生成は後続のstepで進める。進行はStepResult step()を採用し、内部で列挙/ソート/HTML生成を段階的に進める。一定量でIN_PROGRESS、全工程とclosedir成功でCOMPLETED、HTTP-31/32の通常の生成失敗でFAILEDを返す。取得APIはbool takeBody(std::string&)とし、完了後の初回だけHTML本文をswapで渡してtrue、それ以外は出力不変でfalseを返す。Client側は200/text/html応答を組み立てる。ClientはtakeBodyで取得した完成HTMLをHttpResponse::setBodyBySwap(body, "text/html")で応答へ移し、prepareResponseBySwapへ渡す。応答全体をpendingResponse_とswapし、共通送信準備へ進む。[応答の所有権移譲](../Requirements.md#response-ownership-handoff)を参照する。引き渡しに成功するとbodyは空になる。[本文の引き渡し](../Requirements.md#autoindex-response-body-swap)を参照する。ディレクトリは列挙の正常終端直後/ソート前にclosedirし、成功後にソートへ進む。DIR*を所有状態から外して一度だけ閉じ、失敗は取得済み一覧を破棄してFAILED/500とする。列挙は1回のstepでreaddir最大32回の採用案とし、.と../終端/失敗の呼び出しも数える。終端/失敗/上限超過で打ち切り、終端未確認なら保持してIN_PROGRESSを返す。段階完了時は次段階の開始状態にしてIN_PROGRESSで戻る。列挙終端/closedir成功後のソートと、ソート完了後のHTML生成は次周から進める。空/1項目も同じ段階切り替えとし、HTML生成完了時は完成本文だけを保持して名前/番号列/作業領域/パスとURL/不要な継続情報を解放または初期化し、DONEでCOMPLETEDを返す。ソートは合計256操作、HTML生成は実追加最大8 KiBの採用案とする。回収APIはvoid cancel()を採用する。保持DIR*をNULLにして一度だけclosedirし、失敗でも再試行しない。名前/番号列/作業領域/HTML/保持パスとURL/位置を解放または初期化して未開始へ戻す。再呼び出し可能で、takeBodyは出力不変のfalseとなり、デストラクターも同じ回収を例外を外へ出さず行う。内部状態はprivateなPhase(IDLE/ENUMERATING/SORTING/BUILDING/DONE/ERROR/TAKEN)を採用する。初期/cancel後はIDLE、start成功でENUMERATING、列挙とclose成功でSORTING、ソート完了でBUILDING、全工程成功でDONE、本文取得でTAKEN、通常の失敗でERRORとする。startはIDLEでのみ開始し、それ以外は500を返してPhase/DIR*/保持データ/入力指示を維持する。拒否の500でERRORへ変更せず、再利用前にcancelでIDLEへ戻す。2026-11-20合意でIDLEからの通常の開始失敗は、取得済みDIR*をNULLにして一度だけcloseし、タスクの保持情報/本文/作業領域を解放して継続位置を初期化し、ERRORで元の開始失敗コードを返す。入力指示は全フィールドを維持し、後続のcancel/破棄で二重回収しない。stepはENUMERATING/SORTING/BUILDINGで該当段階を進める。DONEは処理せずCOMPLETED、ERROR/IDLE/TAKENは処理せずFAILEDを返し、いずれも状態/保持データを維持する。IDLE/TAKENでERRORへ変更せず、DONEの本文取得は初回だけとする。通常の生成失敗はstep内でDIR*の一度だけのcloseと名前/番号列/作業領域/HTML/保持情報の解放を済ませ、ERRORでFAILEDを返す。Clientは500を共通送信準備へ渡し、再step/cancel/破棄で二重回収しない。2026-11-20合意でstart成功後はClientのGENERATING_AUTOINDEXへ進み、IN_PROGRESSは維持、COMPLETEDはtakeBodyから200/text/html応答を生成してprepareResponseへ渡す。開始失敗は返却コード、生成失敗は500を共通送信準備へ渡す。2026-11-20合意でautoindexもstart直前から全段階通算60秒の固定期限、開始周のstep省略/次周から各周最大1回/poll待ち0/startとstep前後の確認/COMPLETED優先を適用する。期限超過はcancel後500、計時失敗はcancel後CLOSINGへ進める。error_pageは新しい60秒を使う。異常経路の具体的な組み込みは後続設計で定める。
+
+FILE_READ_REQUIREDではRouterが対象の解決・種別/権限確認までを行い、FileReadRequestへパスとContent-Typeを値として格納する。FileReadRequest自体はfdを持たない。Clientの値メンバーfileTask_として保持するFileReadTaskがopen/read/closeを担当し、指示の必要な情報を自分で保持する。FileReadTask/Clientはコピー禁止。未開始のタスクはfd=-1・空本文とし、Clientと一緒に生成・破棄する。一時的なFileReadRequestの参照・ポインターは残さない。この結果でCGIを起動したり、まだ無効なresponseを送信したりしない。
 
 実行成功とは正常な子の終了とstdoutのEOFが確認できたことを指し、出力内容の妥当性はparseCgiOutputで別途判定する。失敗時は部分的なstdoutをHTTPへ送らない。生のwaitpidの終了状態はtasugiya側で解釈し、HTTP側へ渡す必須データを増やさない。失敗原因とコードの対応・error_page適用は10/10のCGI-128〜135に従い、結果を確定できる後始末の条件は8/10のCGI-107〜118で確定済み。
 
@@ -473,11 +518,11 @@ waitpidの回収はEventLoopだけが行い、pid>0の直接の子を指定す�
 - パイプのreadが負、または未送信本文に対するwriteが0以下なら502で打ち切る。errnoでEAGAIN/EINTR等を区別して再試行しない。正の部分書き込みは書き込み位置を進める。パイプのPOLLERR/POLLNVALも502とし、入力が残る書き込み側のPOLLHUPも打ち切り対象とする。
 - 完成済みの要求でrecvが0になったことだけでは、応答を受け取れない完全切断と判断しない。送信側だけを閉じたクライアントにも応答できるよう、CGIを継続する。受信EOFを記録してPOLLIN監視を止め、POLLHUP/POLLERRやsendの失敗等で接続が使えないと分かった時に中止する。要求受信中のEOFは既存の不完全要求の処理に従う。
 - WAITING_CGI中もクライアントのpoll通知を扱う。POLLIN時の追加データは固定サイズの一時バッファで読み捨て、次の要求として蓄積・解析しない。1接続1要求の仕様を維持する。
-- 現在のpoll結果には閉じたfdの古い通知が残り得る。処理前に対応する管理オブジェクトと現fdが有効か確認し、閉じたものはスキップする。Client/CgiProcessの削除は現在のpoll結果を処理し終えた時点まで遅らせ、古い通知で解放済みオブジェクトや再利用されたfdを操作しない。
+- 現在のpoll結果には閉じたfdの古い通知が残り得る。処理前に対応する管理オブジェクトと現fdが有効か確認し、閉じたものはスキップする。Client本体の削除はCLOSINGとしてその周の最後まで、CgiProcessの削除は現在のpoll結果を処理し終えた時点まで遅らせ、古い通知で解放済みオブジェクトや再利用されたfdを操作しない。
 
 **子に残すfd**
 
-listenソケット・acceptしたソケット・全CGIパイプに、生成時にfcntl(fd, F_SETFD, FD_CLOEXEC)を設定する。Pythonのexecve成功時に不要なfdが閉じるため、他Clientの接続や他CGIのパイプをPythonへ残さない。現在のCGIのstdin/stdoutはdup2で0/1へ接続し、元のパイプ端・使わない端を閉じる。0/1のFD_CLOEXECは解除する。同じfdへのdup2でも確実に解除し、継承するstderrの2もFD_CLOEXECを解除する。子の起動失敗時は9/10の方法で終了してfdを解放する。
+listenソケット・acceptしたソケット・全CGIパイプに、生成時にfcntl(fd, F_SETFD, FD_CLOEXEC)を設定する。2026-11-18合意でFileReadTask/FileWriteTaskの通常ファイルfdにもopen直後に設定する。Pythonのexecve成功時に不要なfdが閉じるため、他Clientの接続や他CGIのパイプをPythonへ残さない。現在のCGIのstdin/stdoutはdup2で0/1へ接続し、元のパイプ端・使わない端を閉じる。0/1のFD_CLOEXECは解除する。同じfdへのdup2でも確実に解除し、継承するstderrの2もFD_CLOEXECを解除する。子の起動失敗時は9/10の方法で終了してfdを解放する。
 
 このF_SETFDはLinux前提の方針。課題のfcntlの追加制限は「For MacOS only」の節であり、Linuxでの本方針に適用しない。起動時・accept時・CGI起動時の設定失敗は成功扱いにせず、作成済み資源を後始末する。失敗のコードはCGI-129・134に従う。全fdの一覧をstartへ渡す追加APIや/proc走査は設けない。
 
@@ -551,7 +596,7 @@ mainのreturnによる通常終了は[C++規格草案N1905 §3.6.1/5](https://ww
 3. **error_pageの適用**: 出力検証後の最終コードが400〜599なら、CGIが正常に返したエラーも含め、指定ファイルの本文へ置き換える。未指定・読み取り失敗なら内蔵HTMLにする。元のコードを維持し、有効なCGIのStatus説明文は空文字列も保持する。200〜399には適用しない。1xxは既決定のCGI-74により先に502となる。不正出力をerror_pageで覆って元のCGIコードのまま受理しない。
 4. **置換する本文とヘッダー**: エラーページはHTMLとして扱い、Content-Typeはtext/html、Content-Lengthは置換後のバイト数で生成する。元本文の情報を残さないため、CGI由来のContent-*、ETag、Last-Modified、Digest、Repr-Digestを大小文字を区別せず除去する。この一律除去は最小構成のチーム方針。その他の既存転送対象ヘッダー(Allow、WWW-Authenticate、Set-Cookie等)は保持する。200〜399の応答にはこの除去を行わない。
 5. **エラーページの読み取り**: 設定済みのファイルパスをそのまま使い、実行時に通常ファイルであることを確認して読む。空ファイルも読み取り成功なら空本文として採用する。失敗時は元コードの内蔵HTMLへ一度だけフォールバックし、再ルーティング・CGI実行・再帰的なエラー生成を行わない。CGIの8 MiB制限は元のstdoutに適用し、エラーページに新しいCGI専用上限は追加しない。
-6. **内部の共通処理**: HttpResponseにvoid applyErrorPage(const ServerConfig& conf)を追加し、400〜599の場合だけ上記の本文置換を行う。makeErrorは同じ処理を内部で利用する。EventLoopはparseCgiOutputが成功した応答に一度だけapplyErrorPageを呼び、makeErrorの結果には再適用しない。ファイル読み取りと内蔵HTMLへのフォールバックをCGI専用に重複実装しない。
+6. **内部の共通処理(2026-11-15更新)**: makeError(code)で元応答だけを作り、その後にprepareErrorPageで内蔵HTMLを確定するか読み取り指示を作る。読み取りを行った場合はfinishErrorPageで本文を確定する。正常なCGIの検証済み応答はmakeErrorで作り直さず同じ準備経路へ渡す。prepareErrorPageはClient側の共通送信準備に集約し、RouterやCGI出力パーサーから個別に呼ばない。falseならserialize/送信、trueならFileReadTaskへ進み、読み取り結果をfinishErrorPageで確定した後は再準備せず送信する。旧applyErrorPage/readErrorPageは廃止し、内蔵HTML生成と本文関連ヘッダー除去の補助関数を共用する。共通の入口はClient::prepareResponse(const HttpResponse&)とし、コピー保持後に準備を1回行う。error_page適用は一度だけとし、CGI専用に重複実装しない。
 7. **応答を返せない場合**: クライアント切断時は停止・回収だけを行い、応答を生成しない。送信失敗後に別のエラー応答を追加送信しない。listen側のCLOEXEC設定失敗は起動失敗、acceptしたfdの設定失敗はその接続を閉じて監視へ登録しない。CGIパイプの設定失敗は上記の親500/子502の分類を使う。
 8. **結合の完了条件**: 04のCGI受入項目を実装後に満たすことを条件とする。正常なGET/POST・chunked入力、入出力の並行処理、出力検証・エラーコード・上限・期限、切断/半閉鎖/SIGINT、fd継承・子の回収・寿命、CGI実行中の静的配信を確認する。加えて正常なCGIの404/599の置換、200の非置換、エラーページ未指定/読取失敗/空ファイル、元本文の符号化等の除去とAllow等の保持、不正な404出力が502になることを確認する。9/10の代替案は実環境で検証し、必要なら方法を見直す。10項目の合意完了と、未実装の結合試験合格は別に扱う。
 
@@ -587,3 +632,9 @@ mainのreturnによる通常終了は[C++規格草案N1905 §3.6.1/5](https://ww
 | C6(アップロード) | L | RFC読み込み+設計判断(方式・サニタイズ・メモリ) |
 | C8–C10(CGI) | XL | 共同。tasugiya=C8、rysato=C9を主に調査し、C10の結合設計を合同で行う |
 | C11 | M | 後回し可 |
+
+2026-11-17合意: HttpRequest::releaseBody()はCOMPLETEで本文の保持領域を解放し、INCOMPLETE/ERRORでは全保持データと状態を維持して戻る。[本文解放APIの正本](../Requirements.md#request-release-body-api)を参照する。
+
+2026-11-18合意: FileReadTask/FileWriteTaskはopen直後にF_SETFD/FD_CLOEXECを設定し、設定成功後にstart成功を返す。保存本文のswapも設定成功後とする。設定失敗はfdを一度だけ閉じ、保存で今回作成した途中ファイルを削除し、指示側本文を維持して500、読み取りはfalseを返す。CGI子の起動失敗では複製fd/メモリを解放し、親が保存中のファイルを子から削除しない。2026-11-19にpublicなvoid FileWriteTask::cleanupInChild()を採用した。複製fdを一度だけ閉じてfd=-1、保持データを解放し位置0/IDLEへ戻す。途中ファイル削除責任を外し、以後のcancel/破棄でも親のファイルを削除しない。再呼び出し可能で追加確保/ログ/外へ出る例外を避ける。2026-11-19にpublicなvoid Client::cleanupInChild()を採用し、EventLoopの子専用経路がClient破棄前に呼ぶ。Client内で読み取りcancel/保存cleanupInChild/複製ソケットfdのcloseを行い、残る所有メモリを続く破棄までに回収する。再呼び出しと破棄で二重close/削除を防ぐ。[継承防止の正本](../Requirements.md#file-task-cloexec)を参照する。
+
+2026-11-21合意で、共通送信準備ではステータス行とヘッダーだけを生成し、保持済みの本文を別に送る。POLLOUT通知後に既存のsend上限を守り、ヘッダーを送り切ってから本文へ進む。送信期限は準備完了から通算60秒とする。2026-11-23合意で、送信中はClientのpendingResponse_に確定済み本文を保持し、そこから直接送る。送信完了または打ち切り後に本文と送信ヘッダーを回収する。HttpResponseのserializeHeaders()でステータス行・ヘッダー・終端の空行を生成し、getBody()で送信対象の本文をconst参照で取得する。本文の要否とContent-LengthはHttpResponseが決める。[送信用API](../Requirements.md#response-send-accessors)を参照する。
